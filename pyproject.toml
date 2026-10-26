@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ocr-service"
+version = "1.0.0"
+description = "Production-grade Turkish Archival OCR and PDF/A-2b Service"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [
+    { name = "OCR Engineering" }
+]
+dependencies = [
+    "fastapi>=0.115.0,<1.0.0",
+    "uvicorn[standard]>=0.32.0,<1.0.0",
+    "python-multipart>=0.0.12,<1.0.0",
+    "pydantic>=2.9.0,<3.0.0",
+    "pydantic-settings>=2.6.0,<3.0.0",
+    "sqlalchemy>=2.0.36,<3.0.0",
+    "pikepdf>=9.4.0,<10.0.0",
+    "pypdfium2>=4.30.0,<5.0.0",
+    "pillow>=11.0.0,<12.0.0",
+    "opencv-python-headless>=4.10.0.84,<5.0.0",
+    "numpy>=2.0.0,<3.0.0",
+    "fonttools>=4.55.0,<5.0.0",
+    "psutil>=6.1.0,<7.0.0",
+    "httpx>=0.27.2,<1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0,<9.0.0",
+    "pytest-asyncio>=0.24.0,<1.0.0",
+    "pytest-cov>=6.0.0,<7.0.0",
+    "ruff>=0.8.0,<1.0.0",
+]
+
+[project.scripts]
+ocr-api = "ocr_service.main:run_api"
+ocr-worker = "ocr_service.worker_main:run_worker"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ocr_service"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+asyncio_mode = "auto"
+addopts = "-v --tb=short"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "RUF"]
+ignore = ["E501", "RUF001", "RUF002", "RUF003"]

@@ -1,0 +1,1359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <title>Archival Turkish OCR &amp; PDF/A-2b Test Console</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+
+      --bg-canvas: light-dark(#f4f6f9, #0d1117);
+      --bg-surface: light-dark(#ffffff, #161b22);
+      --bg-subtle: light-dark(#f8fafc, #1f242d);
+      --bg-code: light-dark(#f1f5f9, #090d13);
+      --border-color: light-dark(#dde3ea, #30363d);
+      --border-focus: light-dark(#2563eb, #58a6ff);
+
+      --text-primary: light-dark(#0f172a, #e6edf3);
+      --text-secondary: light-dark(#475569, #8b949e);
+      --text-muted: light-dark(#64748b, #6e7681);
+
+      --brand-primary: light-dark(#1d4ed8, #3b82f6);
+      --brand-hover: light-dark(#1e40af, #2563eb);
+      --brand-text: #ffffff;
+
+      --status-ok-bg: light-dark(#dcfce7, #122d1f);
+      --status-ok-fg: light-dark(#15803d, #4ade80);
+      --status-warn-bg: light-dark(#fef9c3, #332701);
+      --status-warn-fg: light-dark(#a16207, #facc15);
+      --status-err-bg: light-dark(#fee2e2, #361417);
+      --status-err-fg: light-dark(#b91c1c, #f87171);
+      --status-info-bg: light-dark(#dbeafe, #13233f);
+      --status-info-fg: light-dark(#1d4ed8, #60a5fa);
+
+      accent-color: var(--brand-primary);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      line-height: 1.5;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: var(--bg-canvas);
+      color: var(--text-primary);
+    }
+
+    header {
+      background-color: var(--bg-surface);
+      border-bottom: 1px solid var(--border-color);
+      padding: 0.85rem 1.5rem;
+      position: sticky;
+      top: 0;
+      z-index: 20;
+    }
+
+    .header-inner {
+      max-width: 1440px;
+      margin: 0 auto;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+    }
+
+    .brand-title {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .brand-title h1 {
+      font-size: 1.15rem;
+      font-weight: 700;
+      margin: 0;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.2rem 0.6rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .badge-ok, .badge-completed {
+      background-color: var(--status-ok-bg);
+      color: var(--status-ok-fg);
+    }
+
+    .badge-warn, .badge-queued, .badge-processing {
+      background-color: var(--status-warn-bg);
+      color: var(--status-warn-fg);
+    }
+
+    .badge-err, .badge-failed, .badge-cancelled, .badge-expired {
+      background-color: var(--status-err-bg);
+      color: var(--status-err-fg);
+    }
+
+    .badge-info {
+      background-color: var(--status-info-bg);
+      color: var(--status-info-fg);
+    }
+
+    .conn-controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.6rem;
+      font-size: 0.82rem;
+    }
+
+    .conn-controls input[type="text"],
+    .conn-controls input[type="password"] {
+      padding: 0.35rem 0.6rem;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      background: var(--bg-subtle);
+      color: var(--text-primary);
+      font-size: 0.82rem;
+    }
+
+    main {
+      max-width: 1440px;
+      margin: 1.25rem auto;
+      padding: 0 1.5rem 2rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.25rem;
+    }
+
+    /* Telemetry Strip */
+    .telemetry-strip {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+      gap: 0.75rem;
+    }
+
+    .metric-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 0.75rem 1rem;
+    }
+
+    .metric-label {
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      font-weight: 600;
+    }
+
+    .metric-value {
+      font-size: 1.25rem;
+      font-weight: 700;
+      margin-top: 0.2rem;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .metric-sub {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-top: 0.15rem;
+    }
+
+    /* Workspace Grid */
+    .workspace-grid {
+      display: grid;
+      grid-template-columns: 420px 1fr;
+      gap: 1.25rem;
+      align-items: start;
+    }
+
+    @media (max-width: 1024px) {
+      .workspace-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .panel {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    .panel-header {
+      padding: 0.85rem 1.15rem;
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      background: var(--bg-subtle);
+    }
+
+    .panel-header h2 {
+      margin: 0;
+      font-size: 0.95rem;
+      font-weight: 600;
+    }
+
+    .panel-body {
+      padding: 1.15rem;
+    }
+
+    /* Upload Dropzone */
+    .dropzone {
+      border: 2px dashed var(--border-color);
+      border-radius: 8px;
+      padding: 1.35rem 1rem;
+      text-align: center;
+      cursor: pointer;
+      background: var(--bg-subtle);
+      transition: border-color 0.15s ease;
+    }
+
+    .dropzone.dragover, .dropzone:hover {
+      border-color: var(--brand-primary);
+    }
+
+    .dropzone input[type="file"] {
+      display: none;
+    }
+
+    .file-list {
+      margin: 0.75rem 0 0;
+      padding: 0;
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+
+    .file-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 0.82rem;
+      padding: 0.35rem 0.6rem;
+      background: var(--bg-subtle);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
+      margin-top: 1rem;
+    }
+
+    .form-field {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+      font-size: 0.82rem;
+    }
+
+    .form-field.full {
+      grid-column: 1 / -1;
+    }
+
+    .form-field label {
+      font-weight: 600;
+      color: var(--text-secondary);
+    }
+
+    .form-field select,
+    .form-field input[type="number"],
+    .form-field input[type="text"] {
+      padding: 0.45rem 0.6rem;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      background: var(--bg-subtle);
+      color: var(--text-primary);
+      font-size: 0.85rem;
+    }
+
+    .checkbox-group {
+      grid-column: 1 / -1;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.85rem;
+      margin-top: 0.25rem;
+      font-size: 0.82rem;
+    }
+
+    .checkbox-group label {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      cursor: pointer;
+    }
+
+    button {
+      cursor: pointer;
+      border: 1px solid var(--border-color);
+      background: var(--bg-subtle);
+      color: var(--text-primary);
+      padding: 0.45rem 0.85rem;
+      border-radius: 6px;
+      font-size: 0.84rem;
+      font-weight: 600;
+      transition: background 0.15s ease;
+    }
+
+    button:hover:not(:disabled) {
+      background: var(--border-color);
+    }
+
+    button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+
+    button.btn-primary {
+      background: var(--brand-primary);
+      border-color: var(--brand-primary);
+      color: var(--brand-text);
+      width: 100%;
+      padding: 0.65rem;
+      margin-top: 1rem;
+      font-size: 0.9rem;
+    }
+
+    button.btn-primary:hover:not(:disabled) {
+      background: var(--brand-hover);
+    }
+
+    button.btn-danger {
+      background: var(--status-err-bg);
+      color: var(--status-err-fg);
+      border-color: transparent;
+    }
+
+    /* Jobs Tracker List */
+    .jobs-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      max-height: 340px;
+      overflow-y: auto;
+    }
+
+    .job-row {
+      padding: 0.65rem 0.8rem;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      background: var(--bg-subtle);
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+    }
+
+    .job-row.active {
+      border-color: var(--brand-primary);
+      box-shadow: 0 0 0 1px var(--brand-primary);
+    }
+
+    .job-row-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      font-size: 0.82rem;
+    }
+
+    .job-id-mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.78rem;
+      font-weight: 600;
+    }
+
+    progress {
+      width: 100%;
+      height: 8px;
+      border-radius: 4px;
+    }
+
+    /* Tabs */
+    .tabs {
+      display: flex;
+      gap: 0.4rem;
+      border-bottom: 1px solid var(--border-color);
+      padding: 0 1.15rem;
+      background: var(--bg-subtle);
+    }
+
+    .tab-btn {
+      border: none;
+      border-bottom: 2px solid transparent;
+      background: transparent;
+      border-radius: 0;
+      padding: 0.7rem 0.9rem;
+      font-size: 0.84rem;
+      color: var(--text-secondary);
+    }
+
+    .tab-btn.active {
+      color: var(--brand-primary);
+      border-bottom-color: var(--brand-primary);
+    }
+
+    .page-card {
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      margin-bottom: 1rem;
+      overflow: hidden;
+    }
+
+    .page-card-header {
+      background: var(--bg-subtle);
+      padding: 0.6rem 0.9rem;
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      font-size: 0.8rem;
+    }
+
+    .ocr-text-box {
+      margin: 0;
+      padding: 1rem;
+      background: var(--bg-code);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.86rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 360px;
+      overflow-y: auto;
+    }
+
+    .pdf-frame {
+      width: 100%;
+      height: 640px;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      background: #333;
+    }
+
+    table.words-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.78rem;
+      font-variant-numeric: tabular-nums;
+    }
+
+    table.words-table th,
+    table.words-table td {
+      padding: 0.4rem 0.6rem;
+      border-bottom: 1px solid var(--border-color);
+      text-align: left;
+    }
+
+    .alert-banner {
+      padding: 0.75rem 1rem;
+      border-radius: 8px;
+      margin-bottom: 1rem;
+      font-size: 0.85rem;
+      background: var(--status-err-bg);
+      color: var(--status-err-fg);
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <div class="brand-title">
+        <h1>Archival Turkish OCR &amp; PDF/A-2b Console</h1>
+        <span id="healthBadge" class="badge badge-warn">Checking API...</span>
+        <span id="readyBadge" class="badge badge-info">Readiness...</span>
+      </div>
+      <div class="conn-controls">
+        <label for="apiBaseInput">API URL:</label>
+        <input type="text" id="apiBaseInput" style="width: 210px;" placeholder="http://127.0.0.1:8000">
+        <label for="apiKeyInput">API Key:</label>
+        <input type="password" id="apiKeyInput" style="width: 140px;" placeholder="Optional X-API-Key">
+        <label style="display:inline-flex;align-items:center;gap:0.25rem;">
+          <input type="checkbox" id="autoPollToggle" checked> Auto-Poll (2s)
+        </label>
+        <button type="button" id="refreshTelemetryBtn">Refresh Status</button>
+        <a href="/docs" target="_blank" style="color:var(--brand-primary);text-decoration:none;font-weight:600;">Swagger UI &nearr;</a>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div id="globalAlert" class="alert-banner" role="alert" aria-live="polite"></div>
+
+    <!-- Live API Status & System Telemetry -->
+    <section class="telemetry-strip" aria-label="API and Worker Telemetry">
+      <div class="metric-card">
+        <div class="metric-label">OCR Engine &amp; DB</div>
+        <div class="metric-value" id="metricEngine">-</div>
+        <div class="metric-sub" id="metricEngineDetail">Checking Tesseract...</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Live Workers</div>
+        <div class="metric-value" id="metricWorkers">0</div>
+        <div class="metric-sub" id="metricStorageOk">Storage: -</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Queue / Active</div>
+        <div class="metric-value" id="metricQueue">0 / 0</div>
+        <div class="metric-sub" id="metricStatusCounts">Done: 0 | Failed: 0</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Avg Latency</div>
+        <div class="metric-value" id="metricLatency">0 ms</div>
+        <div class="metric-sub" id="metricDocLatency">Per page / Doc: 0 ms</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">CPU &amp; Memory</div>
+        <div class="metric-value" id="metricCpuRam">-</div>
+        <div class="metric-sub" id="metricHostMem">System RAM: -</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Temp Storage</div>
+        <div class="metric-value" id="metricDisk">0 MB</div>
+        <div class="metric-sub" id="metricFreeDisk">Free: -</div>
+      </div>
+    </section>
+
+    <div class="workspace-grid">
+      <!-- Left Column: Job Submission & Tracked Jobs -->
+      <div style="display:flex;flex-direction:column;gap:1.25rem;">
+        <section class="panel" aria-labelledby="submitHeading">
+          <div class="panel-header">
+            <h2 id="submitHeading">1. Submit OCR Job (POST /api/v1/jobs)</h2>
+          </div>
+          <div class="panel-body">
+            <form id="ocrSubmitForm">
+              <div class="dropzone" id="dropzone">
+                <strong>Drop PDF, JPEG, PNG, or Multipage TIFF here</strong>
+                <div style="font-size:0.78rem;color:var(--text-secondary);margin-top:0.25rem;">
+                  Or click to browse (1 PDF or 1..N images in page order)
+                </div>
+                <input type="file" id="fileInput" multiple accept=".pdf,.jpg,.jpeg,.png,.tif,.tiff,image/jpeg,image/png,image/tiff,application/pdf">
+              </div>
+              <ul class="file-list" id="selectedFilesList"></ul>
+
+              <div class="form-grid">
+                <div class="form-field">
+                  <label for="optLanguage">OCR Language</label>
+                  <select id="optLanguage">
+                    <option value="tur" selected>Turkish (tur)</option>
+                    <option value="tur+eng">Turkish + English (tur+eng)</option>
+                    <option value="eng">English (eng)</option>
+                  </select>
+                </div>
+                <div class="form-field">
+                  <label for="optProfile">PDF/A Profile</label>
+                  <select id="optProfile">
+                    <option value="PDF/A-2b" selected>PDF/A-2b (Recommended)</option>
+                    <option value="PDF/A-1b">PDF/A-1b</option>
+                  </select>
+                </div>
+                <div class="form-field">
+                  <label for="optLayout">Layout &amp; Reading Order</label>
+                  <select id="optLayout">
+                    <option value="auto" selected>Auto (Multi-Column Newspaper)</option>
+                    <option value="single_column">Single Column</option>
+                    <option value="multi_column">Force Multi-Column</option>
+                  </select>
+                </div>
+                <div class="form-field">
+                  <label for="optWorkingDpi">Working OCR DPI</label>
+                  <input type="number" id="optWorkingDpi" value="300" min="100" max="600" step="50">
+                </div>
+                <div class="form-field">
+                  <label for="optNlpMode">Turkish NLP (Topic &amp; NER)</label>
+                  <select id="optNlpMode">
+                    <option value="fast" selected>Hybrid Fast CPU (&lt;15 ms/page)</option>
+                    <option value="onnx">Hybrid + ONNX INT8 CPU</option>
+                    <option value="off">Disabled (Off)</option>
+                  </select>
+                </div>
+                <div class="form-field">
+                  <label for="optCustomTopics">Custom Topics (Optional)</label>
+                  <input type="text" id="optCustomTopics" placeholder="e.g. Demiryolu, Mübadele">
+                </div>
+                <div class="form-field full">
+                  <label for="optIdempotency">Idempotency-Key (Optional)</label>
+                  <div style="display:flex;gap:0.4rem;">
+                    <input type="text" id="optIdempotency" style="flex:1;" placeholder="Optional unique request key">
+                    <button type="button" id="genIdemBtn">Generate</button>
+                  </div>
+                </div>
+                <div class="checkbox-group">
+                  <label><input type="checkbox" id="optPreserve" checked> Preserve Source Image Quality</label>
+                  <label><input type="checkbox" id="optDeskew" checked> Deskew Working Copy</label>
+                  <label><input type="checkbox" id="optForceOcr"> Force OCR on Searchable PDF</label>
+                </div>
+              </div>
+
+              <button type="submit" class="btn-primary" id="submitBtn">Upload &amp; Enqueue OCR Job</button>
+            </form>
+          </div>
+        </section>
+
+        <!-- Tracked Jobs List -->
+        <section class="panel" aria-labelledby="jobsHeading">
+          <div class="panel-header">
+            <h2 id="jobsHeading">2. Tracked Jobs &amp; Lookup</h2>
+            <button type="button" id="clearHistoryBtn" style="font-size:0.75rem;padding:0.25rem 0.5rem;">Clear List</button>
+          </div>
+          <div class="panel-body">
+            <div style="display:flex;gap:0.4rem;margin-bottom:0.75rem;">
+              <input type="text" id="lookupJobInput" placeholder="Paste job_id (e.g. job-...)" style="flex:1;padding:0.4rem 0.6rem;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-subtle);color:var(--text-primary);font-size:0.82rem;">
+              <button type="button" id="lookupJobBtn">Track ID</button>
+            </div>
+            <div class="jobs-list" id="jobsListContainer">
+              <div style="font-size:0.82rem;color:var(--text-muted);text-align:center;padding:1rem;">
+                No jobs tracked yet. Submit a file above to start!
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- Right Column: Selected Job Inspector & Results -->
+      <section class="panel" aria-labelledby="inspectorHeading">
+        <div class="panel-header">
+          <div>
+            <h2 id="inspectorHeading">3. Job Result &amp; PDF/A Inspector</h2>
+            <div id="selectedJobSubtitle" style="font-size:0.78rem;color:var(--text-secondary);margin-top:0.15rem;">
+              Select or submit a job to inspect status, extracted Turkish text, word boxes, and searchable PDF/A.
+            </div>
+          </div>
+          <div style="display:flex;gap:0.5rem;align-items:center;" id="jobActionButtons"></div>
+        </div>
+
+        <div class="tabs" role="tablist">
+          <button type="button" class="tab-btn active" data-tab="tab-text">Extracted Text &amp; Pages</button>
+          <button type="button" class="tab-btn" data-tab="tab-pdf">Searchable PDF/A Viewer</button>
+          <button type="button" class="tab-btn" data-tab="tab-words">Word Bounding Boxes</button>
+          <button type="button" class="tab-btn" data-tab="tab-meta">Metadata &amp; Raw JSON</button>
+        </div>
+
+        <div class="panel-body">
+          <!-- Status Summary Banner -->
+          <div id="jobStatusBanner" style="display:none;padding:0.75rem 1rem;border:1px solid var(--border-color);border-radius:8px;background:var(--bg-subtle);margin-bottom:1rem;">
+            <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:0.5rem;">
+              <div>
+                <span class="job-id-mono" id="detailJobId">-</span>
+                <span id="detailStatusBadge" class="badge badge-info" style="margin-left:0.5rem;">-</span>
+              </div>
+              <div style="font-size:0.8rem;color:var(--text-secondary);" id="detailTimings">-</div>
+            </div>
+            <div style="margin-top:0.5rem;">
+              <progress id="detailProgress" value="0" max="100"></progress>
+              <div style="display:flex;justify-content:space-between;font-size:0.76rem;color:var(--text-secondary);margin-top:0.2rem;">
+                <span id="detailPageCount">Pages: 0 / 0</span>
+                <span id="detailPdfaStatus">PDF/A: -</span>
+              </div>
+            </div>
+            <div id="detailErrorBox" style="display:none;margin-top:0.5rem;padding:0.5rem;border-radius:6px;background:var(--status-err-bg);color:var(--status-err-fg);font-size:0.8rem;"></div>
+          </div>
+
+          <!-- Tab 1: Extracted Text -->
+          <div id="tab-text" class="tab-pane">
+            <div id="pagesTextContainer" style="color:var(--text-muted);font-size:0.85rem;">
+              No completed job loaded.
+            </div>
+          </div>
+
+          <!-- Tab 2: PDF/A Viewer -->
+          <div id="tab-pdf" class="tab-pane" style="display:none;">
+            <div id="pdfViewerContainer" style="color:var(--text-muted);font-size:0.85rem;">
+              PDF/A preview will appear here once the job is completed.
+            </div>
+          </div>
+
+          <!-- Tab 3: Word Bounding Boxes -->
+          <div id="tab-words" class="tab-pane" style="display:none;">
+            <div id="wordsTableContainer" style="color:var(--text-muted);font-size:0.85rem;">
+              Word-level geometry (Source Px &amp; PDF Pt coordinates) will appear here once completed.
+            </div>
+          </div>
+
+          <!-- Tab 4: Metadata & Raw JSON -->
+          <div id="tab-meta" class="tab-pane" style="display:none;">
+            <pre class="ocr-text-box" id="rawMetadataPre" style="max-height:540px;">No metadata loaded.</pre>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    const STORAGE_KEY = "ocr_api_tracked_jobs_v1";
+    let selectedFiles = [];
+    let trackedJobs = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+    let activeJobId = trackedJobs.length > 0 ? trackedJobs[0].job_id : null;
+    let loadedResultForJobId = null;
+
+    const apiBaseInput = document.getElementById("apiBaseInput");
+    const apiKeyInput = document.getElementById("apiKeyInput");
+    const autoPollToggle = document.getElementById("autoPollToggle");
+    const globalAlert = document.getElementById("globalAlert");
+
+    // Default API base URL to current origin if served via HTTP(S), else localhost:8000
+    if (window.location.protocol.startsWith("http")) {
+      apiBaseInput.value = window.location.origin;
+    } else {
+      apiBaseInput.value = "http://127.0.0.1:8000";
+    }
+
+    function getApiBase() {
+      return (apiBaseInput.value || "http://127.0.0.1:8000").replace(/\/+$/, "");
+    }
+
+    function getHeaders(extra = {}) {
+      const h = { ...extra };
+      const key = apiKeyInput.value.trim();
+      if (key) {
+        h["X-API-Key"] = key;
+      }
+      return h;
+    }
+
+    function showAlert(msg) {
+      if (!msg) {
+        globalAlert.style.display = "none";
+        globalAlert.textContent = "";
+        return;
+      }
+      globalAlert.textContent = msg;
+      globalAlert.style.display = "block";
+    }
+
+    function saveTrackedJobs() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(trackedJobs.slice(0, 30)));
+    }
+
+    function upsertTrackedJob(jobSummary) {
+      const idx = trackedJobs.findIndex(j => j.job_id === jobSummary.job_id);
+      if (idx >= 0) {
+        trackedJobs[idx] = { ...trackedJobs[idx], ...jobSummary };
+      } else {
+        trackedJobs.unshift(jobSummary);
+      }
+      saveTrackedJobs();
+      renderJobsList();
+    }
+
+    // --- 1. Live API Health, Readiness & Metrics Polling ---
+    async function refreshApiTelemetry() {
+      const base = getApiBase();
+      const healthBadge = document.getElementById("healthBadge");
+      const readyBadge = document.getElementById("readyBadge");
+
+      try {
+        const [liveResp, readyResp, metricsResp] = await Promise.all([
+          fetch(`${base}/api/v1/health/live`, { headers: getHeaders() }),
+          fetch(`${base}/api/v1/health/ready`, { headers: getHeaders() }),
+          fetch(`${base}/api/v1/metrics`, { headers: getHeaders() })
+        ]);
+
+        if (liveResp.ok) {
+          const live = await liveResp.json();
+          healthBadge.className = "badge badge-ok";
+          healthBadge.textContent = `API Online (v${live.version})`;
+        } else {
+          healthBadge.className = "badge badge-err";
+          healthBadge.textContent = `API Error (${liveResp.status})`;
+        }
+
+        if (readyResp.ok || readyResp.status === 503) {
+          const ready = await readyResp.json();
+          readyBadge.className = `badge ${ready.status === "ready" ? "badge-ok" : "badge-warn"}`;
+          readyBadge.textContent = `State: ${ready.status.toUpperCase()}`;
+
+          document.getElementById("metricEngine").textContent = ready.ocr_engine_ok ? "Tesseract Ready" : "Engine Error";
+          document.getElementById("metricEngineDetail").textContent = ready.ocr_engine_detail || "-";
+          document.getElementById("metricWorkers").textContent = String(ready.live_workers ?? 0);
+          document.getElementById("metricStorageOk").textContent = `DB: ${ready.database_ok ? "OK" : "ERR"} | Disk: ${ready.storage_ok ? "OK" : "ERR"}`;
+          if (ready.details && ready.details.storage && ready.details.storage.free_mb !== undefined) {
+            document.getElementById("metricFreeDisk").textContent = `Free: ${(ready.details.storage.free_mb / 1024).toFixed(1)} GB`;
+          }
+        }
+
+        if (metricsResp.ok) {
+          const m = await metricsResp.json();
+          document.getElementById("metricQueue").textContent = `${m.queue_depth} / ${m.active_jobs}`;
+          const st = m.jobs_by_status || {};
+          document.getElementById("metricStatusCounts").textContent =
+            `Done: ${st.completed || 0} | Fail: ${st.failed || 0} | Exp: ${st.expired || 0}`;
+          document.getElementById("metricLatency").textContent = `${Math.round(m.avg_page_duration_ms || 0)} ms`;
+          document.getElementById("metricDocLatency").textContent =
+            `Per page | Doc avg: ${Math.round(m.avg_document_duration_ms || 0)} ms`;
+
+          if (m.system) {
+            document.getElementById("metricCpuRam").textContent =
+              `${m.system.cpu_percent.toFixed(0)}% / ${m.system.process_rss_mb.toFixed(0)} MB`;
+            document.getElementById("metricHostMem").textContent =
+              `Host RAM: ${(m.system.system_memory_available_mb / 1024).toFixed(1)} GB avail (${m.system.cpu_count_logical} cores)`;
+          }
+          if (m.storage) {
+            document.getElementById("metricDisk").textContent = `${m.storage.jobs_dir_used_mb.toFixed(2)} MB`;
+          }
+        }
+      } catch (err) {
+        healthBadge.className = "badge badge-err";
+        healthBadge.textContent = "API Unreachable";
+        readyBadge.className = "badge badge-err";
+        readyBadge.textContent = "Disconnected";
+      }
+    }
+
+    // --- 2. File Drag & Drop and Submission ---
+    const dropzone = document.getElementById("dropzone");
+    const fileInput = document.getElementById("fileInput");
+    const selectedFilesList = document.getElementById("selectedFilesList");
+
+    dropzone.addEventListener("click", () => fileInput.click());
+    dropzone.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      dropzone.classList.add("dragover");
+    });
+    dropzone.addEventListener("dragleave", () => dropzone.classList.remove("dragover"));
+    dropzone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      dropzone.classList.remove("dragover");
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        selectedFiles = [...selectedFiles, ...Array.from(e.dataTransfer.files)];
+        renderSelectedFiles();
+      }
+    });
+    fileInput.addEventListener("change", () => {
+      if (fileInput.files.length > 0) {
+        selectedFiles = [...selectedFiles, ...Array.from(fileInput.files)];
+        renderSelectedFiles();
+        fileInput.value = "";
+      }
+    });
+
+    function renderSelectedFiles() {
+      selectedFilesList.innerHTML = "";
+      selectedFiles.forEach((file, idx) => {
+        const li = document.createElement("li");
+        li.className = "file-item";
+        const kb = (file.size / 1024).toFixed(1);
+        li.innerHTML = `
+          <span><strong>#${idx + 1}</strong> ${escapeHtml(file.name)} <span style="color:var(--text-muted)">(${kb} KB)</span></span>
+          <button type="button" data-rm="${idx}" style="padding:0.15rem 0.45rem;font-size:0.75rem;">&times;</button>
+        `;
+        li.querySelector("button").addEventListener("click", () => {
+          selectedFiles.splice(idx, 1);
+          renderSelectedFiles();
+        });
+        selectedFilesList.appendChild(li);
+      });
+    }
+
+    document.getElementById("genIdemBtn").addEventListener("click", () => {
+      document.getElementById("optIdempotency").value = `idem-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    });
+
+    document.getElementById("ocrSubmitForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      showAlert("");
+      if (selectedFiles.length === 0) {
+        showAlert("Please select at least one file (PDF, JPEG, PNG, or TIFF) before submitting.");
+        return;
+      }
+
+      const submitBtn = document.getElementById("submitBtn");
+      submitBtn.disabled = true;
+      submitBtn.textContent = "Uploading & Enqueueing...";
+
+      try {
+        const formData = new FormData();
+        selectedFiles.forEach(f => formData.append("files", f, f.name));
+        formData.append("language", document.getElementById("optLanguage").value);
+        formData.append("pdfa_profile", document.getElementById("optProfile").value);
+        formData.append("layout_mode", document.getElementById("optLayout").value);
+        formData.append("working_dpi", document.getElementById("optWorkingDpi").value);
+        formData.append("preserve_source_images", document.getElementById("optPreserve").checked ? "true" : "false");
+        formData.append("deskew_working_image", document.getElementById("optDeskew").checked ? "true" : "false");
+        formData.append("force_ocr", document.getElementById("optForceOcr").checked ? "true" : "false");
+        const nlpModeVal = document.getElementById("optNlpMode").value;
+        formData.append("nlp_mode", nlpModeVal);
+        formData.append("enable_nlp", nlpModeVal !== "off" ? "true" : "false");
+        const customTopicsVal = document.getElementById("optCustomTopics").value.trim();
+        if (customTopicsVal) {
+          formData.append("custom_topics", customTopicsVal);
+        }
+
+        const extraHeaders = {};
+        const idemKey = document.getElementById("optIdempotency").value.trim();
+        if (idemKey) {
+          extraHeaders["Idempotency-Key"] = idemKey;
+        }
+
+        const resp = await fetch(`${getApiBase()}/api/v1/jobs`, {
+          method: "POST",
+          headers: getHeaders(extraHeaders),
+          body: formData
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          const errMsg = data?.error ? `[${data.error.code}] ${data.error.message}` : `HTTP ${resp.status}`;
+          showAlert(`Submission failed: ${errMsg}`);
+          return;
+        }
+
+        const label = selectedFiles.map(f => f.name).join(", ");
+        selectedFiles = [];
+        renderSelectedFiles();
+
+        activeJobId = data.job_id;
+        loadedResultForJobId = null;
+        upsertTrackedJob({
+          job_id: data.job_id,
+          status: data.status,
+          label: label,
+          created_at: data.created_at,
+          progress_percent: 0
+        });
+        await pollJobStatus(data.job_id, true);
+        await refreshApiTelemetry();
+      } catch (err) {
+        showAlert(`Network error while submitting job: ${err.message}`);
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = "Upload & Enqueue OCR Job";
+      }
+    });
+
+    // --- 3. Tracked Jobs List & Status Polling ---
+    function renderJobsList() {
+      const container = document.getElementById("jobsListContainer");
+      if (trackedJobs.length === 0) {
+        container.innerHTML = `<div style="font-size:0.82rem;color:var(--text-muted);text-align:center;padding:1rem;">No jobs tracked yet.</div>`;
+        return;
+      }
+      container.innerHTML = "";
+      trackedJobs.forEach(job => {
+        const div = document.createElement("div");
+        div.className = `job-row ${job.job_id === activeJobId ? "active" : ""}`;
+        const pct = Math.round(job.progress_percent || (job.status === "completed" ? 100 : 0));
+        div.innerHTML = `
+          <div class="job-row-top">
+            <span class="job-id-mono">${escapeHtml(job.job_id)}</span>
+            <span class="badge badge-${escapeHtml(job.status || "info")}">${escapeHtml(job.status || "unknown")}</span>
+          </div>
+          <div style="font-size:0.78rem;color:var(--text-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+            ${escapeHtml(job.label || "OCR Document")}
+          </div>
+          <progress value="${pct}" max="100"></progress>
+        `;
+        div.addEventListener("click", () => {
+          activeJobId = job.job_id;
+          loadedResultForJobId = null;
+          renderJobsList();
+          pollJobStatus(job.job_id, true);
+        });
+        container.appendChild(div);
+      });
+    }
+
+    document.getElementById("lookupJobBtn").addEventListener("click", () => {
+      const jid = document.getElementById("lookupJobInput").value.trim();
+      if (!jid) return;
+      activeJobId = jid;
+      loadedResultForJobId = null;
+      upsertTrackedJob({ job_id: jid, status: "queued", label: "Manual Lookup" });
+      pollJobStatus(jid, true);
+    });
+
+    document.getElementById("clearHistoryBtn").addEventListener("click", () => {
+      trackedJobs = [];
+      activeJobId = null;
+      loadedResultForJobId = null;
+      saveTrackedJobs();
+      renderJobsList();
+      document.getElementById("jobStatusBanner").style.display = "none";
+      document.getElementById("pagesTextContainer").textContent = "No completed job loaded.";
+      document.getElementById("pdfViewerContainer").textContent = "No PDF loaded.";
+      document.getElementById("wordsTableContainer").textContent = "No word geometry loaded.";
+      document.getElementById("rawMetadataPre").textContent = "No metadata loaded.";
+      document.getElementById("jobActionButtons").innerHTML = "";
+    });
+
+    async function pollJobStatus(jobId, isSelected = false) {
+      try {
+        const resp = await fetch(`${getApiBase()}/api/v1/jobs/${encodeURIComponent(jobId)}`, {
+          headers: getHeaders()
+        });
+        if (!resp.ok) {
+          if (isSelected) {
+            const errData = await resp.json().catch(() => ({}));
+            showAlert(`Job lookup failed (${resp.status}): ${errData?.error?.message || resp.statusText}`);
+          }
+          return;
+        }
+        const statusData = await resp.json();
+        upsertTrackedJob({
+          job_id: statusData.job_id,
+          status: statusData.status,
+          progress_percent: statusData.progress_percent,
+          page_count: statusData.page_count,
+          completed_pages: statusData.completed_pages
+        });
+
+        if (jobId === activeJobId) {
+          updateSelectedJobBanner(statusData);
+          if (statusData.status === "completed" && loadedResultForJobId !== jobId) {
+            loadedResultForJobId = jobId;
+            await loadCompletedJobDetails(jobId);
+          } else if (statusData.status !== "completed") {
+            await loadJobMetadataOnly(jobId);
+          }
+        }
+      } catch (err) {
+        // Ignore transient poll errors
+      }
+    }
+
+    function updateSelectedJobBanner(st) {
+      const banner = document.getElementById("jobStatusBanner");
+      banner.style.display = "block";
+      document.getElementById("selectedJobSubtitle").textContent = `Inspecting ${st.job_id}`;
+      document.getElementById("detailJobId").textContent = st.job_id;
+
+      const badge = document.getElementById("detailStatusBadge");
+      badge.className = `badge badge-${st.status}`;
+      badge.textContent = st.status;
+
+      document.getElementById("detailProgress").value = st.progress_percent || 0;
+      document.getElementById("detailPageCount").textContent =
+        `Pages: ${st.completed_pages} / ${st.page_count} (${st.progress_percent}%) | Attempt: ${st.attempt_count}/${st.max_retries + 1}`;
+      document.getElementById("detailPdfaStatus").textContent =
+        `Profile: ${st.pdfa_profile} | Compliant: ${st.pdfa_compliant === null ? "Pending" : st.pdfa_compliant ? "YES" : "NO"}`;
+      document.getElementById("detailTimings").textContent =
+        st.processing_duration_ms ? `Processed in ${st.processing_duration_ms} ms` : "Processing...";
+
+      const errBox = document.getElementById("detailErrorBox");
+      if (st.error_message) {
+        errBox.style.display = "block";
+        errBox.textContent = `[${st.error_code || "ERROR"}] ${st.error_message} (retryable=${st.retryable})`;
+      } else {
+        errBox.style.display = "none";
+      }
+
+      const actionsDiv = document.getElementById("jobActionButtons");
+      actionsDiv.innerHTML = "";
+
+      if (st.status === "queued" || st.status === "processing") {
+        const cancelBtn = document.createElement("button");
+        cancelBtn.className = "btn-danger";
+        cancelBtn.textContent = "Cancel Job";
+        cancelBtn.addEventListener("click", async () => {
+          await fetch(`${getApiBase()}/api/v1/jobs/${encodeURIComponent(st.job_id)}/cancel`, {
+            method: "POST",
+            headers: getHeaders()
+          });
+          await pollJobStatus(st.job_id, true);
+        });
+        actionsDiv.appendChild(cancelBtn);
+      }
+
+      if (st.status === "completed") {
+        const pdfUrl = `${getApiBase()}/api/v1/jobs/${encodeURIComponent(st.job_id)}/pdf?inline=false`;
+        const dlLink = document.createElement("a");
+        dlLink.href = pdfUrl;
+        dlLink.target = "_blank";
+        dlLink.style.cssText = "background:var(--brand-primary);color:#fff;padding:0.4rem 0.8rem;border-radius:6px;text-decoration:none;font-size:0.82rem;font-weight:600;";
+        dlLink.textContent = "Download PDF/A-2b";
+        actionsDiv.appendChild(dlLink);
+      }
+    }
+
+    async function loadCompletedJobDetails(jobId) {
+      const base = getApiBase();
+      try {
+        const [resResp, metaResp] = await Promise.all([
+          fetch(`${base}/api/v1/jobs/${encodeURIComponent(jobId)}/result?include_boxes=true`, { headers: getHeaders() }),
+          fetch(`${base}/api/v1/jobs/${encodeURIComponent(jobId)}/metadata`, { headers: getHeaders() })
+        ]);
+
+        if (resResp.ok) {
+          const resultData = await resResp.json();
+          renderExtractedPages(resultData);
+          renderWordsTable(resultData);
+          renderPdfPreview(jobId);
+        }
+        if (metaResp.ok) {
+          const metaData = await metaResp.json();
+          document.getElementById("rawMetadataPre").textContent = JSON.stringify(metaData, null, 2);
+        }
+      } catch (err) {
+        showAlert(`Failed to load job results: ${err.message}`);
+      }
+    }
+
+    async function loadJobMetadataOnly(jobId) {
+      try {
+        const metaResp = await fetch(`${getApiBase()}/api/v1/jobs/${encodeURIComponent(jobId)}/metadata`, {
+          headers: getHeaders()
+        });
+        if (metaResp.ok) {
+          const metaData = await metaResp.json();
+          document.getElementById("rawMetadataPre").textContent = JSON.stringify(metaData, null, 2);
+        }
+      } catch (_e) {}
+    }
+
+    function renderExtractedPages(resultData) {
+      const container = document.getElementById("pagesTextContainer");
+      if (!resultData.pages || resultData.pages.length === 0) {
+        container.textContent = "No pages returned.";
+        return;
+      }
+      container.innerHTML = "";
+
+      // Render Document-Level Turkish NLP Summary if present
+      const docNlp = resultData.document_nlp_summary;
+      if (docNlp && (docNlp.document_topics?.length || docNlp.top_entities?.length)) {
+        const docSummaryCard = document.createElement("div");
+        docSummaryCard.className = "page-card";
+        docSummaryCard.style.borderColor = "var(--brand-primary)";
+        const topicsHtml = (docNlp.document_topics || []).map(t =>
+          `<span class="badge badge-info" style="text-transform:none;margin-right:0.35rem;margin-bottom:0.25rem;">${escapeHtml(t.category)} (${Math.round(t.confidence * 100)}%)</span>`
+        ).join("");
+        const kwHtml = (docNlp.document_keywords || []).slice(0, 8).map(k =>
+          `<span class="badge badge-ok" style="text-transform:none;margin-right:0.35rem;margin-bottom:0.25rem;">#${escapeHtml(k.term)}</span>`
+        ).join("");
+        const entHtml = (docNlp.top_entities || []).slice(0, 12).map(e =>
+          `<span class="badge badge-warn" style="text-transform:none;margin-right:0.35rem;margin-bottom:0.25rem;" title="Pages: ${(e.pages || []).join(', ')}"><strong>${escapeHtml(e.label)}:</strong> ${escapeHtml(e.text)} (&times;${e.mention_count})</span>`
+        ).join("");
+
+        docSummaryCard.innerHTML = `
+          <div class="page-card-header" style="background:var(--status-info-bg);color:var(--status-info-fg);">
+            <strong>Document-Level Turkish NLP Summary (${docNlp.analyzed_page_count || resultData.page_count} pages)</strong>
+          </div>
+          <div style="padding:0.75rem 0.9rem;font-size:0.8rem;display:flex;flex-direction:column;gap:0.45rem;">
+            <div><strong>Topics (Konular):</strong> ${topicsHtml || "-"}</div>
+            <div><strong>Keyphrases (Anahtar Kelimeler):</strong> ${kwHtml || "-"}</div>
+            <div><strong>Top Named Entities (NER):</strong> ${entHtml || "-"}</div>
+          </div>
+        `;
+        container.appendChild(docSummaryCard);
+      }
+
+      resultData.pages.forEach(p => {
+        const card = document.createElement("div");
+        card.className = "page-card";
+
+        let nlpStripHtml = "";
+        if (p.nlp) {
+          const pTopics = (p.nlp.topics || []).map(t =>
+            `<span class="badge badge-info" style="text-transform:none;margin-right:0.3rem;margin-bottom:0.2rem;" title="Matched: ${escapeHtml((t.matched_terms || []).join(', '))}">${escapeHtml(t.category)} (${Math.round(t.confidence * 100)}%)</span>`
+          ).join("");
+          const pKeywords = (p.nlp.keywords || []).slice(0, 6).map(k =>
+            `<span class="badge badge-ok" style="text-transform:none;margin-right:0.3rem;margin-bottom:0.2rem;">#${escapeHtml(k.term)}</span>`
+          ).join("");
+          const pEntities = (p.nlp.entities || []).slice(0, 15).map(e => {
+            const coordTip = e.bbox_source_px
+              ? `px(${e.bbox_source_px.left},${e.bbox_source_px.top},${e.bbox_source_px.width}x${e.bbox_source_px.height})`
+              : "text-span";
+            return `<span class="badge badge-warn" style="text-transform:none;margin-right:0.3rem;margin-bottom:0.2rem;" title="${escapeHtml(coordTip)}"><strong>${escapeHtml(e.label)}:</strong> ${escapeHtml(e.text)}</span>`;
+          }).join("");
+
+          if (pTopics || pKeywords || pEntities) {
+            nlpStripHtml = `
+              <div style="padding:0.55rem 0.9rem;border-bottom:1px solid var(--border-color);background:var(--bg-surface);font-size:0.78rem;display:flex;flex-direction:column;gap:0.3rem;">
+                <div><strong>Konu (Topics):</strong> ${pTopics || "<span style='color:var(--text-muted)'>-</span>"}</div>
+                <div><strong>Anahtar Kelimeler:</strong> ${pKeywords || "<span style='color:var(--text-muted)'>-</span>"}</div>
+                <div><strong>NER Varlıkları (${(p.nlp.entities || []).length}):</strong> ${pEntities || "<span style='color:var(--text-muted)'>-</span>"}</div>
+              </div>
+            `;
+          }
+        }
+
+        card.innerHTML = `
+          <div class="page-card-header">
+            <div>
+              <strong>Page ${p.page_number}</strong>
+              <span style="color:var(--text-secondary);margin-left:0.5rem;">
+                ${p.width_px}&times;${p.height_px} px (${p.width_pt}&times;${p.height_pt} pt) |
+                ${p.dpi_x} DPI (${escapeHtml(p.dpi_source)}) |
+                Columns: ${p.column_count} |
+                Confidence: ${p.mean_confidence}% |
+                ${p.processing_duration_ms} ms |
+                Mode: <code>${escapeHtml(p.image_preservation_mode)}</code>
+              </span>
+            </div>
+            <button type="button" class="copy-btn" style="padding:0.2rem 0.55rem;font-size:0.75rem;">Copy Text</button>
+          </div>
+          ${nlpStripHtml}
+          <pre class="ocr-text-box"></pre>
+        `;
+        card.querySelector("pre").textContent = p.text || "(No text recognized on this page)";
+        card.querySelector(".copy-btn").addEventListener("click", (ev) => {
+          navigator.clipboard.writeText(p.text || "");
+          ev.target.textContent = "Copied!";
+          setTimeout(() => { ev.target.textContent = "Copy Text"; }, 1200);
+        });
+        container.appendChild(card);
+      });
+    }
+
+    let currentPdfObjectUrl = null;
+    let currentPdfJobId = null;
+
+    async function renderPdfPreview(jobId) {
+      currentPdfJobId = jobId;
+      const inlinePdfUrl = `${getApiBase()}/api/v1/jobs/${encodeURIComponent(jobId)}/pdf?inline=true`;
+      const container = document.getElementById("pdfViewerContainer");
+
+      try {
+        const resp = await fetch(inlinePdfUrl, { headers: getHeaders() });
+        if (!resp.ok) {
+          container.textContent = `Could not load PDF preview (HTTP ${resp.status}).`;
+          return;
+        }
+        const buf = await resp.arrayBuffer();
+        if (currentPdfObjectUrl) {
+          URL.revokeObjectURL(currentPdfObjectUrl);
+        }
+        const blob = new Blob([buf], { type: "application/pdf" });
+        currentPdfObjectUrl = URL.createObjectURL(blob);
+
+        container.innerHTML = `
+          <div style="margin-bottom:0.5rem;display:flex;justify-content:space-between;align-items:center;gap:0.5rem;font-size:0.82rem;color:var(--text-secondary);">
+            <span>Tip: Select text or press <strong>Ctrl+F / Cmd+F</strong> inside the viewer below to test the invisible <code>3 Tr</code> Turkish Unicode text layer.</span>
+            <a href="${inlinePdfUrl}" target="_blank" style="color:var(--brand-primary);font-weight:600;text-decoration:none;white-space:nowrap;">Open PDF in New Tab &nearr;</a>
+          </div>
+          <object class="pdf-frame" data="${currentPdfObjectUrl}" type="application/pdf">
+            <iframe class="pdf-frame" src="${inlinePdfUrl}" title="Searchable PDF/A Preview"></iframe>
+          </object>
+        `;
+      } catch (_err) {
+        container.innerHTML = `
+          <div style="margin-bottom:0.5rem;display:flex;justify-content:space-between;align-items:center;gap:0.5rem;font-size:0.82rem;color:var(--text-secondary);">
+            <span>Tip: Select text or press <strong>Ctrl+F / Cmd+F</strong> inside the viewer below to test the invisible <code>3 Tr</code> Turkish Unicode text layer.</span>
+            <a href="${inlinePdfUrl}" target="_blank" style="color:var(--brand-primary);font-weight:600;text-decoration:none;white-space:nowrap;">Open PDF in New Tab &nearr;</a>
+          </div>
+          <iframe class="pdf-frame" src="${inlinePdfUrl}" title="Searchable PDF/A Preview"></iframe>
+        `;
+      }
+    }
+
+    function renderWordsTable(resultData) {
+      const container = document.getElementById("wordsTableContainer");
+      const allWords = [];
+      (resultData.pages || []).forEach(p => {
+        (p.words || []).forEach(w => {
+          allWords.push({ page: p.page_number, ...w });
+        });
+      });
+
+      if (allWords.length === 0) {
+        container.textContent = "No word bounding boxes (page may have used native PDF text layer without OCR).";
+        return;
+      }
+
+      const rowsHtml = allWords.slice(0, 300).map(w => {
+        const px = w.bbox_source_px || {};
+        const pt = w.bbox_pdf_pt || {};
+        return `
+          <tr>
+            <td>${w.page}</td>
+            <td><strong>${escapeHtml(w.text)}</strong></td>
+            <td>${w.confidence}%</td>
+            <td>${w.column_index + 1}</td>
+            <td>${px.left}, ${px.top} (${px.width}&times;${px.height})</td>
+            <td>${pt.x ?? "-"}, ${pt.y ?? "-"} (${pt.width ?? "-"}&times;${pt.height ?? "-"})</td>
+          </tr>
+        `;
+      }).join("");
+
+      container.innerHTML = `
+        <div style="margin-bottom:0.5rem;font-size:0.8rem;color:var(--text-secondary);">
+          Showing ${Math.min(allWords.length, 300)} of ${allWords.length} recognized word bounding boxes:
+        </div>
+        <div style="max-height:500px;overflow-y:auto;border:1px solid var(--border-color);border-radius:8px;">
+          <table class="words-table">
+            <thead>
+              <tr>
+                <th>Page</th>
+                <th>Recognized Word (NFC)</th>
+                <th>Conf</th>
+                <th>Col</th>
+                <th>Source Image BBox (px, top-left)</th>
+                <th>PDF User Space BBox (pt, bottom-left)</th>
+              </tr>
+            </thead>
+            <tbody>${rowsHtml}</tbody>
+          </table>
+        </div>
+      `;
+    }
+
+    // --- Tabs Switching ---
+    document.querySelectorAll(".tab-btn").forEach(btn => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+        document.querySelectorAll(".tab-pane").forEach(p => { p.style.display = "none"; });
+        btn.classList.add("active");
+        const target = document.getElementById(btn.dataset.tab);
+        if (target) target.style.display = "block";
+        if (btn.dataset.tab === "tab-pdf" && currentPdfJobId) {
+          renderPdfPreview(currentPdfJobId);
+        }
+      });
+    });
+
+    function escapeHtml(str) {
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    document.getElementById("refreshTelemetryBtn").addEventListener("click", () => {
+      refreshApiTelemetry();
+      if (activeJobId) pollJobStatus(activeJobId, true);
+    });
+
+    // Periodic polling loop
+    setInterval(async () => {
+      if (!autoPollToggle.checked) return;
+      await refreshApiTelemetry();
+      for (const j of trackedJobs) {
+        if (j.status === "queued" || j.status === "processing") {
+          await pollJobStatus(j.job_id, j.job_id === activeJobId);
+        }
+      }
+    }, 2000);
+
+    // Initial load
+    renderJobsList();
+    refreshApiTelemetry();
+    if (activeJobId) {
+      pollJobStatus(activeJobId, true);
+    }
+  </script>
+</body>
+</html>
