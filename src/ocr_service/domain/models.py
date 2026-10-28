@@ -361,6 +361,8 @@ class JobSubmissionOptions:
     working_dpi: int = 300
     preserve_source_images: bool = True
     deskew_working_image: bool = True
+    # Opt-in: whitens light red/yellow marks (archive stamps, viewer highlights) before OCR.
+    remove_color_marks: bool = False
     layout_mode: LayoutMode = LayoutMode.AUTO
     pdfa_profile: PdfAProfile = PdfAProfile.PDFA_2B
     enable_nlp: bool = True
@@ -374,6 +376,7 @@ class JobSubmissionOptions:
             "working_dpi": self.working_dpi,
             "preserve_source_images": self.preserve_source_images,
             "deskew_working_image": self.deskew_working_image,
+            "remove_color_marks": self.remove_color_marks,
             "layout_mode": self.layout_mode.value,
             "pdfa_profile": self.pdfa_profile.value,
             "enable_nlp": self.enable_nlp,
@@ -393,6 +396,7 @@ class JobSubmissionOptions:
             working_dpi=int(data.get("working_dpi", 300)),
             preserve_source_images=bool(data.get("preserve_source_images", True)),
             deskew_working_image=bool(data.get("deskew_working_image", True)),
+            remove_color_marks=bool(data.get("remove_color_marks", False)),
             layout_mode=LayoutMode(data.get("layout_mode", LayoutMode.AUTO.value)),
             pdfa_profile=PdfAProfile(data.get("pdfa_profile", PdfAProfile.PDFA_2B.value)),
             enable_nlp=enable_nlp,

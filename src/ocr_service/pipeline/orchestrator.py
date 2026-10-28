@@ -316,6 +316,7 @@ class OcrPipelineOrchestrator:
             target_working_dpi=job.options.working_dpi,
             enable_deskew=job.options.deskew_working_image,
             cardinal_rotation_cw=0,
+            remove_color_marks=job.options.remove_color_marks,
         )
 
         try:
@@ -340,6 +341,7 @@ class OcrPipelineOrchestrator:
                         target_working_dpi=job.options.working_dpi,
                         enable_deskew=job.options.deskew_working_image,
                         cardinal_rotation_cw=correction_cw,
+                        remove_color_marks=job.options.remove_color_marks,
                     )
                     ocr_rot = self._ocr_engine.recognize_page(
                         prepared_rot.working_image_path,

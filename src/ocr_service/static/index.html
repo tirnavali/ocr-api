@@ -605,6 +605,7 @@
                 <div class="checkbox-group">
                   <label><input type="checkbox" id="optPreserve" checked> Preserve Source Image Quality</label>
                   <label><input type="checkbox" id="optDeskew" checked> Deskew Working Copy</label>
+                  <label title="Açık kırmızı/pembe damga ve sarı vurguları OCR kopyasında beyazlatır. Kırmızı başlık gibi açık renkli baskıyı da siler."><input type="checkbox" id="optColorMarks"> Remove Stamps / Highlights</label>
                   <label><input type="checkbox" id="optForceOcr"> Force OCR on Searchable PDF</label>
                 </div>
               </div>
@@ -894,6 +895,7 @@
         formData.append("working_dpi", document.getElementById("optWorkingDpi").value);
         formData.append("preserve_source_images", document.getElementById("optPreserve").checked ? "true" : "false");
         formData.append("deskew_working_image", document.getElementById("optDeskew").checked ? "true" : "false");
+        formData.append("remove_color_marks", document.getElementById("optColorMarks").checked ? "true" : "false");
         formData.append("force_ocr", document.getElementById("optForceOcr").checked ? "true" : "false");
         const nlpModeVal = document.getElementById("optNlpMode").value;
         formData.append("nlp_mode", nlpModeVal);

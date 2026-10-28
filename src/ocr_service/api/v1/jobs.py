@@ -184,6 +184,13 @@ def submit_ocr_job(
         bool | None,
         Form(description="Deskew temporary OCR working copy and inverse-map word coordinates."),
     ] = None,
+    remove_color_marks: Annotated[
+        bool,
+        Form(
+            description="Whiten light red/yellow marks (stamps, highlights) on the OCR working copy. "
+            "Off by default: light coloured print such as a red masthead would be removed too."
+        ),
+    ] = False,
     layout_mode: Annotated[
         LayoutMode,
         Form(description="Document layout and reading-order mode."),
@@ -258,6 +265,7 @@ def submit_ocr_job(
         working_dpi=working_dpi,
         preserve_source_images=preserve_source_images,
         deskew_working_image=deskew_working_image,
+        remove_color_marks=remove_color_marks,
         layout_mode=layout_mode,
         pdfa_profile=pdfa_profile,
         enable_nlp=enable_nlp,
@@ -343,6 +351,7 @@ def submit_cdn_ocr_job(
         working_dpi=request.working_dpi,
         preserve_source_images=request.preserve_source_images,
         deskew_working_image=request.deskew_working_image,
+        remove_color_marks=request.remove_color_marks,
         layout_mode=request.layout_mode,
         pdfa_profile=request.pdfa_profile,
         enable_nlp=request.enable_nlp,
@@ -568,6 +577,7 @@ def _build_options(
     enable_nlp: bool,
     nlp_mode: NlpMode,
     custom_topics: list[str],
+    remove_color_marks: bool = False,
 ) -> JobSubmissionOptions:
     """Merge per-request OCR options with service defaults."""
     return JobSubmissionOptions(
@@ -582,6 +592,7 @@ def _build_options(
         deskew_working_image=(
             settings.deskew_working_image if deskew_working_image is None else deskew_working_image
         ),
+        remove_color_marks=remove_color_marks,
         layout_mode=layout_mode,
         pdfa_profile=pdfa_profile or PdfAProfile(settings.pdf_a_profile),
         enable_nlp=enable_nlp and (nlp_mode != NlpMode.OFF),

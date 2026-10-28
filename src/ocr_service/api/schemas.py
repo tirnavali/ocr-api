@@ -43,6 +43,7 @@ class CdnOcrJobRequest(BaseModel):
     working_dpi: int | None = Field(default=None, ge=100, le=600)
     preserve_source_images: bool | None = None
     deskew_working_image: bool | None = None
+    remove_color_marks: bool = False
     layout_mode: LayoutMode = LayoutMode.AUTO
     pdfa_profile: PdfAProfile | None = None
     enable_nlp: bool = False
