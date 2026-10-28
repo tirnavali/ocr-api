@@ -70,6 +70,9 @@ services:
       PDF_A_PROFILE: "${PDF_A_PROFILE:-PDF/A-2b}"
       PRESERVE_SOURCE_IMAGES: "true"
       DESKEW_WORKING_IMAGE: "true"
+      # nlp_mode=onnx: BERTurk NER model directory inside the container (README 2.4).
+      NER_MODEL_DIR: "${NER_MODEL_DIR:-}"
+      NER_MODEL_FILE: "${NER_MODEL_FILE:-model_int8.onnx}"
       CDN_BASE_URL: "${CDN_BASE_URL:-}"
       CDN_VERIFICATION_ID: "${CDN_VERIFICATION_ID:-}"
       CDN_VERIFY_TLS: "${CDN_VERIFY_TLS:-true}"
@@ -78,6 +81,7 @@ services:
       CALLBACK_VERIFY_TLS: "${CALLBACK_VERIFY_TLS:-true}"
     volumes:
       - ocr_shared_data:/data/ocr
+      - "${NER_MODEL_HOST_DIR:-./models/ner}:/models/ner:ro"
     read_only: true
     tmpfs:
       - /tmp:size=2G,mode=1777

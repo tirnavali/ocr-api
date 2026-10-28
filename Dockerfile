@@ -32,7 +32,9 @@ RUN pip install --upgrade pip build wheel && \
         "numpy>=2.0.0,<3.0.0" \
         "fonttools>=4.55.0,<5.0.0" \
         "psutil>=6.1.0,<7.0.0" \
-        "httpx>=0.27.2,<1.0.0"
+        "httpx>=0.27.2,<1.0.0" \
+        "onnxruntime>=1.20.0,<2.0.0" \
+        "tokenizers>=0.20.0,<1.0.0"
 
 # --- Production Runtime Stage ---
 FROM python:3.12-slim-bookworm AS runtime

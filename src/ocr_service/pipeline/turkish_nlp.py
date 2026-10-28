@@ -23,6 +23,7 @@ from ocr_service.domain.models import (
     TopicPrediction,
     WordBox,
 )
+from ocr_service.pipeline.ner_onnx import LazyOnnxBertNer, OnnxBertNer
 
 logger = logging.getLogger(__name__)
 
@@ -1142,18 +1143,12 @@ def _union_bbox_pt(boxes: list[BBoxPt]) -> BBoxPt | None:
 class TurkishNlpAnalyzer:
     """CPU-efficient Turkish Topic Classifier, Keyphrase Extractor, and Hybrid NER Engine."""
 
-    def __init__(self) -> None:
+    def __init__(self, onnx_ner: LazyOnnxBertNer | None = None) -> None:
         self._normalizer = TurkishMorphNormalizer()
-        self._onnx_available = self._check_onnx_runtime()
-
-    @staticmethod
-    def _check_onnx_runtime() -> bool:
-        try:
-            import onnxruntime  # noqa: F401
-
-            return True
-        except ImportError:
-            return False
+        # nlp_mode=onnx uses this BERTurk model for PER/ORG/LOC; without a model directory
+        # (NER_MODEL_DIR) or when it fails to load, the rule engine answers and the page
+        # reports engine_used="hybrid_fast_tr" so callers can see which engine ran.
+        self._onnx_ner = onnx_ner
 
     def analyze_page(
         self,
@@ -1169,22 +1164,18 @@ class TurkishNlpAnalyzer:
             return PageNlpAnalysis(engine_used="off")
 
         start_ns = time.perf_counter_ns()
+        model = self._onnx_ner.get() if (mode == NlpMode.ONNX and self._onnx_ner) else None
+        engine_name = "hybrid_onnx_tr" if model is not None else "hybrid_fast_tr"
         tokens = self._build_tokens(text, words)
         if not tokens:
-            return PageNlpAnalysis(
-                engine_used="hybrid_onnx_tr" if (mode == NlpMode.ONNX and self._onnx_available) else "hybrid_fast_tr",
-                processing_duration_ms=0,
-            )
+            return PageNlpAnalysis(engine_used=engine_name, processing_duration_ms=0)
 
         topics = self._classify_topics(tokens, custom_topics=custom_topics)
         keywords = self._extract_keywords(tokens, page_height_px=page_height_px)
         entities = self._extract_entities(tokens)
+        if model is not None:
+            entities = self._merge_model_entities(tokens, entities, model)
 
-        engine_name = (
-            "hybrid_onnx_tr"
-            if (mode == NlpMode.ONNX and self._onnx_available)
-            else "hybrid_fast_tr"
-        )
         duration_ms = int((time.perf_counter_ns() - start_ns) / 1_000_000)
 
         return PageNlpAnalysis(
@@ -1484,6 +1475,53 @@ class TurkishNlpAnalyzer:
                 break
 
         return keywords
+
+    def _merge_model_entities(
+        self, tokens: list[_PageToken], rule_entities: list[NamedEntity], model: OnnxBertNer
+    ) -> list[NamedEntity]:
+        """BERTurk PER/ORG/LOC plus the rule engine's DATE and LAW_REF (the model has neither)."""
+        kept = [e for e in rule_entities if e.label in (EntityLabel.DATE, EntityLabel.LAW_REF)]
+        taken = {i for e in kept for i in e.word_indices}
+        tags = model.tag_words([t.raw for t in tokens])
+
+        spans: list[tuple[int, int, str, list[float]]] = []
+        for i, wt in enumerate(tags):
+            if wt.tag == "O" or "-" not in wt.tag:
+                continue
+            prefix, kind = wt.tag.split("-", 1)
+            cur = spans[-1] if spans else None
+            # I- continues the open span of the same kind; anything else starts a new span
+            # (also a stray I- without a B-, which BERT taggers emit occasionally).
+            if prefix == "I" and cur is not None and cur[1] == i and cur[2] == kind:
+                spans[-1] = (cur[0], i + 1, kind, [*cur[3], wt.prob])
+            else:
+                spans.append((i, i + 1, kind, [wt.prob]))
+
+        labels = {"PER": EntityLabel.PER, "ORG": EntityLabel.ORG, "LOC": EntityLabel.LOC}
+        model_entities: list[NamedEntity] = []
+        for start, end, kind, probs in spans:
+            label = labels.get(kind)
+            span_tokens = tokens[start:end]
+            if label is None or any(t.index in taken for t in span_tokens):
+                continue
+            px = [t.word_box.bbox_source_px for t in span_tokens if t.word_box is not None]
+            pt = [t.word_box.bbox_pdf_pt for t in span_tokens if t.word_box is not None and t.word_box.bbox_pdf_pt]
+            raw_text = " ".join(t.clean for t in span_tokens)
+            model_entities.append(
+                NamedEntity(
+                    text=raw_text,
+                    normalized_text=raw_text,
+                    label=label,
+                    confidence=float(sum(probs) / len(probs)),
+                    source="onnx_berturk",
+                    word_indices=[t.index for t in span_tokens],
+                    bbox_source_px=_union_bbox_px(px),
+                    bbox_pdf_pt=_union_bbox_pt(pt),
+                )
+            )
+        merged = kept + model_entities
+        merged.sort(key=lambda e: e.word_indices[0] if e.word_indices else 0)
+        return merged
 
     def _extract_entities(self, tokens: list[_PageToken]) -> list[NamedEntity]:
         """Extract PER, ORG, LOC, DATE, and LAW_REF entities and bind them to WordBox coordinates."""

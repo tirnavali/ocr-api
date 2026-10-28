@@ -75,7 +75,35 @@ room; every part ends with a `MANIFEST.txt` (`Durum;Ref;PaketIciAd;Boyut;HataKod
 - `GET /api/v1/jobs/{job_id}` and the callback both carry `package`: counts, the part list and the
   first 200 skipped files.
 
-### 2.4 Signed Completion Callbacks
+### 2.4 Turkish NER: rule engine and BERTurk (ONNX INT8)
+
+`nlp_mode=fast` runs the rule engine (dictionary + capitalisation patterns). `nlp_mode=onnx`
+runs a BERTurk token-classification model for PER/ORG/LOC on CPU via ONNX Runtime; DATE and
+LAW_REF still come from the rules (the model has no such labels). The page reports which
+engine actually ran in `nlp.engine_used` (`hybrid_onnx_tr` / `hybrid_fast_tr`): without a model,
+or if it fails to load, onnx mode falls back to the rules instead of failing the job.
+
+Model setup (not in git, ~110 MB):
+
+1. Download `model.onnx`, `config.json`, `tokenizer.json` of
+   [akdeniz27/bert-base-turkish-cased-ner](https://huggingface.co/akdeniz27/bert-base-turkish-cased-ner)
+   (MIT, fine-tuned from dbmdz BERTurk) into a folder, e.g. `models/ner/`.
+2. `pip install -e .[ner,ner-tools]` and run `python scripts/prepare_ner_model.py models/ner`
+   to write `model_int8.onnx` (dynamic INT8; tags identical to FP32 on the check sentence).
+3. Set `NER_MODEL_HOST_DIR` (host folder) and `NER_MODEL_DIR=/models/ner` for docker compose.
+
+Measured on two OCR'd archive pages (1959 newspaper, magazine; 47 hand-labelled entities,
+type-level match), one CPU thread:
+
+| Engine | Recall | Precision | F1 | Time (2 pages) |
+| :--- | ---: | ---: | ---: | ---: |
+| rule (`fast`) | 0.04 | 0.40 | 0.08 | 0.06 s |
+| BERTurk FP32 | 0.64 | 0.64 | 0.64 | 5.5 s |
+| BERTurk INT8 (`onnx`) | 0.64 | 0.64 | 0.64 | 3.8 s |
+
+Most remaining BERTurk errors come from OCR (misread names, words hyphenated across lines).
+
+### 2.5 Signed Completion Callbacks
 
 If a job has a `callback_url` (must start with one of `CALLBACK_ALLOWED_PREFIXES`), the service POSTs
 a JSON summary when the job becomes `completed`, `failed` or `cancelled`. Delivery uses a durable

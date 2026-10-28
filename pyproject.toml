@@ -30,6 +30,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# nlp_mode=onnx (BERTurk NER on CPU). Installed in the Docker image; the model itself is mounted.
+ner = [
+    "onnxruntime>=1.20.0,<2.0.0",
+    "tokenizers>=0.20.0,<1.0.0",
+]
+# Only for scripts/prepare_ner_model.py (INT8 quantization), not needed at runtime.
+ner-tools = [
+    "onnx>=1.17.0,<2.0.0",
+]
 dev = [
     "pytest>=8.3.0,<9.0.0",
     "pytest-asyncio>=0.24.0,<1.0.0",

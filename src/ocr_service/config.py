@@ -148,6 +148,11 @@ class Settings(BaseSettings):
     callback_max_attempts: int = Field(default=12, ge=1, le=100, alias="CALLBACK_MAX_ATTEMPTS")
     callback_verify_tls: bool = Field(default=True, alias="CALLBACK_VERIFY_TLS")
 
+    # BERTurk NER for nlp_mode=onnx (directory with tokenizer.json, config.json and the
+    # ONNX model; see scripts/prepare_ner_model.py). Unset: onnx mode uses the rule engine.
+    ner_model_dir: Path | None = Field(default=None, alias="NER_MODEL_DIR")
+    ner_model_file: str = Field(default="model_int8.onnx", alias="NER_MODEL_FILE")
+
     # PDF/A & Quality Preservation (FR-05, FR-12, FR-14)
     pdf_a_profile: Literal["PDF/A-2b", "PDF/A-1b"] = Field(
         default="PDF/A-2b", alias="PDF_A_PROFILE"
@@ -177,6 +182,12 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [k.strip() for k in v.split(",") if k.strip()]
         return v
+
+    @field_validator("ner_model_dir", mode="before")
+    @classmethod
+    def empty_path_is_none(cls, v: object) -> object:
+        # docker compose passes NER_MODEL_DIR="" when unset; Path("") would mean the cwd.
+        return None if isinstance(v, str) and not v.strip() else v
 
     @field_validator("worker_job_types", "callback_allowed_prefixes", mode="before")
     @classmethod

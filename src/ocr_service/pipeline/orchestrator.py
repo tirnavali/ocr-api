@@ -36,6 +36,7 @@ from ocr_service.pipeline.geometry import (
 )
 from ocr_service.pipeline.inspector import DocumentInspector, detect_file_format_by_magic
 from ocr_service.pipeline.layout import analyze_layout_and_reading_order
+from ocr_service.pipeline.ner_onnx import LazyOnnxBertNer
 from ocr_service.pipeline.ocr_engine import TesseractOcrEngine
 from ocr_service.pipeline.pdfa_generator import PdfAGenerator
 from ocr_service.pipeline.pdfa_validator import DualPdfAValidator
@@ -67,7 +68,13 @@ class OcrPipelineOrchestrator:
         self._ocr_engine = ocr_engine or TesseractOcrEngine(settings)
         self._pdfa_generator = PdfAGenerator(settings)
         self._pdfa_validator = pdfa_validator or DualPdfAValidator(settings)
-        self._nlp_analyzer = nlp_analyzer or TurkishNlpAnalyzer()
+        self._nlp_analyzer = nlp_analyzer or TurkishNlpAnalyzer(
+            onnx_ner=LazyOnnxBertNer(
+                settings.ner_model_dir,
+                settings.ner_model_file,
+                threads=settings.ocr_threads_per_worker,
+            )
+        )
 
     def execute_job(self, job: JobEntity, worker_id: str) -> JobEntity:
         """Execute a claimed job with page-level checkpointing, timeout, and cancellation checks."""
