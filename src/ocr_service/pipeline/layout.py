@@ -57,29 +57,21 @@ def _group_words_into_lines(words: list[WordBox], page_width_px: int) -> list[Re
     if not words:
         return []
 
-    # First check if Tesseract line tuples (block, par, line) are well-formed;
-    # however, in multi-column scans Tesseract sometimes merges words across adjacent columns
-    # into a single line if their Y coordinates align. We therefore split any line whose
-    # horizontal gap between consecutive words exceeds 3.0x median word height.
-    sorted_by_y = sorted(words, key=lambda w: (w.bbox_source_px.center_y, w.bbox_source_px.left))
-    heights = [w.bbox_source_px.height for w in sorted_by_y]
+    # As a safety net against a Tesseract line that still runs across a gutter, any line
+    # whose gap between consecutive words exceeds ~2.8x the median word height is split.
+    heights = [w.bbox_source_px.height for w in words]
     median_h = float(np.median(heights)) if heights else 20.0
     max_intra_line_gap = max(median_h * 2.8, page_width_px * 0.045)
 
-    raw_clusters: list[list[WordBox]] = []
-    for w in sorted_by_y:
-        placed = False
-        wy = w.bbox_source_px.center_y
-        wh = w.bbox_source_px.height
-        for cluster in reversed(raw_clusters[-15:]):
-            cy = sum(item.bbox_source_px.center_y for item in cluster) / len(cluster)
-            ch = sum(item.bbox_source_px.height for item in cluster) / len(cluster)
-            if abs(wy - cy) <= 0.55 * max(wh, ch):
-                cluster.append(w)
-                placed = True
-                break
-        if not placed:
-            raw_clusters.append([w])
+    # Tesseract's own page segmentation (block, par, line) already separates columns, even
+    # when the gutter is much narrower than the gap threshold above (e.g. ~20 px on a
+    # 800 px magazine scan). Grouping only by Y merged same-height lines of adjacent
+    # columns into one "spanning" line and interleaved the columns, so Tesseract's lines
+    # are used whenever the words carry them.
+    if any(w.line_num > 0 for w in words):
+        raw_clusters = _group_by_tesseract_line(words)
+    else:
+        raw_clusters = _group_by_vertical_position(words)
 
     lines: list[ReconstructedLine] = []
     for cluster in raw_clusters:
@@ -97,6 +89,33 @@ def _group_words_into_lines(words: list[WordBox], page_width_px: int) -> list[Re
             lines.append(_build_line(current_segment))
 
     return lines
+
+
+def _group_by_tesseract_line(words: list[WordBox]) -> list[list[WordBox]]:
+    clusters: dict[tuple[int, int, int], list[WordBox]] = {}
+    for w in words:
+        clusters.setdefault((w.block_num, w.par_num, w.line_num), []).append(w)
+    return list(clusters.values())
+
+
+def _group_by_vertical_position(words: list[WordBox]) -> list[list[WordBox]]:
+    """Fallback for words without Tesseract structure (e.g. restored or synthetic boxes)."""
+    sorted_by_y = sorted(words, key=lambda w: (w.bbox_source_px.center_y, w.bbox_source_px.left))
+    raw_clusters: list[list[WordBox]] = []
+    for w in sorted_by_y:
+        placed = False
+        wy = w.bbox_source_px.center_y
+        wh = w.bbox_source_px.height
+        for cluster in reversed(raw_clusters[-15:]):
+            cy = sum(item.bbox_source_px.center_y for item in cluster) / len(cluster)
+            ch = sum(item.bbox_source_px.height for item in cluster) / len(cluster)
+            if abs(wy - cy) <= 0.55 * max(wh, ch):
+                cluster.append(w)
+                placed = True
+                break
+        if not placed:
+            raw_clusters.append([w])
+    return raw_clusters
 
 
 def _build_line(words: list[WordBox]) -> ReconstructedLine:
@@ -137,7 +156,11 @@ def _detect_column_gutters(
     min_gutter_bins = max(3, int(bins * 0.015))
     min_col_bins = max(12, int(bins * 0.08))
 
-    occupied = hist > 0
+    # A few short headline/byline lines that happen to cross the gutter (e.g. a kicker
+    # line above the columns) must not close it, so bins covered by only a small share
+    # of the lines count as empty. For short pages the floor stays 0 (any coverage counts).
+    noise_floor = int(0.08 * int(hist.max()))
+    occupied = hist > noise_floor
     intervals: list[tuple[int, int]] = []
     start: int | None = None
     for idx, val in enumerate(occupied):
