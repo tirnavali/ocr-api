@@ -152,7 +152,9 @@ def test_multicolumn_turkish_newspaper_reading_order_end_to_end(
 
     # Spanning headline comes first, then entire First Column, then Second Column
     pos_headline = text.find("CUMHURİYET")
-    pos_col1_end = text.find("üçüncü")
+    # "sonu" ends column 1 only; "üçüncü" occurs in both columns and Tesseract may
+    # read the left one as "Üçüncü", so find() would land in column 2.
+    pos_col1_end = text.find("sonu")
     pos_col2_start = text.find("başlangıcı")
 
     assert pos_headline != -1 and pos_col1_end != -1 and pos_col2_start != -1
