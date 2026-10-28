@@ -31,6 +31,9 @@ Interactive OpenAPI / Swagger UI is served at `/docs` and ReDoc at `/redoc`.
 | `GET` | `/api/v1/jobs/{job_id}/pdf` | `200 OK` / `409` / `410` | Stream completed searchable PDF/A binary (`application/pdf`). |
 | `GET` | `/api/v1/jobs/{job_id}/metadata` | `200 OK` | Retrieve audit events, per-page timings, DPI sources, image preservation modes, and PDF/A validation report. |
 | `POST` | `/api/v1/jobs/{job_id}/cancel` | `200 OK` | Cancel a `queued` job immediately or signal cooperative cancellation on a `processing` job. |
+| `POST` | `/api/v1/jobs/package` | `202 Accepted` | JSON body with `entries: [{path, name, ref?}]` (CDN path, path inside the zip, caller's id), `max_part_mb`, `part_name_prefix`, `manifest_title`, `callback_url`. Builds size-limited zip parts. |
+| `GET` | `/api/v1/jobs/{job_id}/packages/{part_no}` | `200 OK` / `206` / `409` / `410` | Download one zip part of a completed package job; `Range` requests are supported. |
+| `DELETE` | `/api/v1/jobs/{job_id}` | `200 OK` | Purge a job's files now (cancels it first if it is still running). |
 | `GET` | `/api/v1/health/live` | `200 OK` | Container liveness check. |
 | `GET` | `/api/v1/health/ready` | `200 OK` / `503` | Readiness check verifying SQLite WAL write access, disk quota, and Tesseract `tur` language data. |
 | `GET` | `/api/v1/metrics` | `200 OK` | Queue depth, active jobs, page latency averages, error counters, CPU/RAM & storage metrics. |
@@ -52,7 +55,27 @@ the job immediately (`CDN_SOURCE_NOT_FOUND`, no retries); network errors and `5x
 Note: the TBMM internal CDN currently answers a missing file with `500` and an empty body, so such
 jobs end as `CDN_FETCH_FAILED` after `JOB_MAX_RETRIES` retries rather than failing on the first try.
 
-### 2.3 Signed Completion Callbacks
+### 2.3 Package Jobs (zip export)
+
+A `package` job is claimed only by a worker with `WORKER_JOB_TYPES=package` (the `package-worker`
+service in `docker-compose.yml`). The worker downloads one file at a time from the CDN, stores it
+uncompressed into the open zip part and deletes the download, so disk use is the parts themselves
+plus one file in flight. A part is closed when it has passed `max_part_mb` and another file needs
+room; every part ends with a `MANIFEST.txt` (`Durum;Ref;PaketIciAd;Boyut;HataKodu`).
+
+- A file that cannot be fetched (missing, CDN `5xx` after one retry, larger than
+  `MAX_PACKAGE_FILE_MB`) is skipped and listed in the result instead of failing the package.
+- If no file at all could be fetched the job fails with `PACKAGE_EMPTY`; five consecutive network
+  failures (no HTTP answer) mean the CDN is down and the whole attempt is retried later.
+- Zip entry names keep their folders, but absolute paths, drive letters, `..` segments and characters
+  invalid on Windows are removed; duplicate names get a `_2`, `_3` suffix.
+- The entry list is stored in the job directory, not in the job table, so large exports do not
+  slow down status queries. Limits: `MAX_PACKAGE_ENTRIES`, `MAX_PACKAGE_PART_MB`,
+  `PACKAGE_JOB_TIMEOUT_SECONDS`; parts are kept for `PACKAGE_RETENTION_HOURS`.
+- `GET /api/v1/jobs/{job_id}` and the callback both carry `package`: counts, the part list and the
+  first 200 skipped files.
+
+### 2.4 Signed Completion Callbacks
 
 If a job has a `callback_url` (must start with one of `CALLBACK_ALLOWED_PREFIXES`), the service POSTs
 a JSON summary when the job becomes `completed`, `failed` or `cancelled`. Delivery uses a durable

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import logging
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -71,8 +72,18 @@ class InternalCdnClient:
         base = (self._settings.cdn_base_url or "").rstrip("/") + "/"
         return base + normalize_cdn_path(cdn_path)
 
-    def download_to(self, cdn_path: str, destination: Path, *, max_bytes: int) -> int:
+    def download_to(
+        self,
+        cdn_path: str,
+        destination: Path,
+        *,
+        max_bytes: int,
+        on_progress: Callable[[int], None] | None = None,
+    ) -> int:
         """Stream ``cdn_path`` into ``destination``; return the byte count.
+
+        ``on_progress`` is called with the bytes written so far after every chunk, so a
+        long download can renew the worker lease or abort on cancellation by raising.
 
         A 404 is permanent (the file was never uploaded or was deleted) so the job fails
         immediately instead of burning retries; network errors and 5xx are transient.
@@ -115,6 +126,8 @@ class InternalCdnClient:
                                 code="CDN_SOURCE_TOO_LARGE",
                             )
                         fh.write(chunk)
+                        if on_progress is not None:
+                            on_progress(written)
             if written == 0:
                 raise CdnSourceNotFoundError(
                     f"CDN file is empty: {cdn_path}", details={"cdn_path": cdn_path}

@@ -62,6 +62,7 @@ def build_callback_payload(job: JobEntity) -> dict[str, Any]:
     """Terminal job summary; result artifacts are fetched separately via the listed URLs."""
     completed = job.status.value == "completed"
     base = f"/api/v1/jobs/{job.job_id}"
+    is_package = job.job_type.value == "package"
     return {
         "job_id": job.job_id,
         "job_type": job.job_type.value,
@@ -74,8 +75,12 @@ def build_callback_payload(job: JobEntity) -> dict[str, Any]:
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
         "expires_at": job.expires_at.isoformat() if job.expires_at else None,
         "status_url": base,
-        "result_url": f"{base}/result" if completed else None,
-        "pdf_url": f"{base}/pdf" if completed else None,
+        "result_url": f"{base}/result" if completed and not is_package else None,
+        "pdf_url": f"{base}/pdf" if completed and not is_package else None,
+        # Package jobs report their parts (and skipped files) inline, so the receiver can
+        # record them without a second round trip; parts download from packages_url/{part_no}.
+        "package": job.metadata_json.get("package") if is_package else None,
+        "packages_url": f"{base}/packages" if completed and is_package else None,
     }
 
 

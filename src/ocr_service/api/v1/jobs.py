@@ -22,11 +22,16 @@ from ocr_service.api.schemas import (
     BBoxPxSchema,
     CdnOcrJobRequest,
     JobCancelResponse,
+    JobDeleteResponse,
     JobMetadataResponse,
     JobPagesListResponse,
     JobStatusResponse,
     JobStructuredResultResponse,
     JobSubmitResponse,
+    PackageJobRequest,
+    PackagePartSchema,
+    PackageResultSchema,
+    PackageSkippedFileSchema,
     PageNlpAnalysisSchema,
     PageResultSchema,
     PageTelemetrySchema,
@@ -41,11 +46,13 @@ from ocr_service.domain.models import (
     JobType,
     LayoutMode,
     NlpMode,
+    PackageEntry,
     PageOcrResult,
     PdfAProfile,
 )
 from ocr_service.exceptions import (
     JobExpiredError,
+    JobNotFoundError,
     JobNotReadyError,
     ValidationError,
 )
@@ -55,6 +62,11 @@ from ocr_service.infrastructure.db.repository import JobRepository
 from ocr_service.infrastructure.storage.local_storage import LocalJobStorage, sanitize_filename
 from ocr_service.logging_config import correlation_id_ctx
 from ocr_service.pipeline.inspector import detect_file_format_by_magic
+from ocr_service.pipeline.packager import (
+    PACKAGE_ENTRIES_FILENAME,
+    package_part_path,
+    write_package_entries,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -358,6 +370,191 @@ def submit_cdn_ocr_job(
     return _build_submit_response(job, idempotent_replay=False)
 
 
+@router.post(
+    "/jobs/package",
+    response_model=JobSubmitResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Submit a zip package job built from internal CDN files",
+)
+def submit_package_job(
+    request: PackageJobRequest,
+    settings: Annotated[Settings, Depends(get_app_settings)],
+    storage: Annotated[LocalJobStorage, Depends(get_job_storage)],
+    repo: Annotated[JobRepository, Depends(get_job_repository)],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key", description="Optional client idempotency key."),
+    ] = None,
+) -> JobSubmitResponse:
+    """Enqueue a package job; a package-pool worker fetches the files and writes the parts.
+
+    The entry list is kept in the job directory instead of the job table, so a request
+    with tens of thousands of files does not slow down every status query.
+    """
+    if not (settings.cdn_base_url and settings.cdn_verification_id):
+        raise ValidationError(
+            "Package jobs are disabled: CDN_BASE_URL and CDN_VERIFICATION_ID are not configured.",
+            code="CDN_NOT_CONFIGURED",
+        )
+    if len(request.entries) > settings.max_package_entries:
+        raise ValidationError(
+            f"A package may contain at most {settings.max_package_entries} files "
+            f"(requested {len(request.entries)}).",
+            code="PACKAGE_TOO_MANY_ENTRIES",
+        )
+    if request.max_part_mb > settings.max_package_part_mb:
+        raise ValidationError(
+            f"max_part_mb may not exceed {settings.max_package_part_mb}.",
+            code="PACKAGE_PART_TOO_LARGE",
+        )
+    checked_callback_url = validate_callback_url(settings, request.callback_url)
+
+    entries: list[PackageEntry] = []
+    for e in request.entries:
+        normalize_cdn_path(e.path)
+        entries.append(PackageEntry(path=e.path.strip(), name=e.name, ref=e.ref))
+
+    package_options = {
+        "max_part_mb": request.max_part_mb,
+        "part_name_prefix": request.part_name_prefix,
+        "manifest_title": request.manifest_title,
+    }
+    content_sha256 = hashlib.sha256(
+        json.dumps(
+            [package_options, [e.to_dict() for e in entries]], ensure_ascii=False
+        ).encode("utf-8")
+    ).hexdigest()
+    if idempotency_key:
+        existing = repo.find_idempotent_job(idempotency_key, content_sha256)
+        if existing is not None:
+            return _build_submit_response(existing, idempotent_replay=True)
+
+    storage.check_storage_capacity()
+    job_id = f"job-{uuid.uuid4().hex}"
+    paths = storage.get_job_paths(job_id, create=True)
+    entries_path = paths.input_dir / PACKAGE_ENTRIES_FILENAME
+    write_package_entries(entries_path, entries)
+    try:
+        job = repo.enqueue_job(
+            job_id=job_id,
+            options=_build_options(
+                settings,
+                language=None,
+                force_ocr=None,
+                working_dpi=None,
+                preserve_source_images=None,
+                deskew_working_image=None,
+                layout_mode=LayoutMode.AUTO,
+                pdfa_profile=None,
+                enable_nlp=False,
+                nlp_mode=NlpMode.OFF,
+                custom_topics=[],
+            ),
+            input_filenames=[PACKAGE_ENTRIES_FILENAME],
+            input_paths=[entries_path],
+            content_sha256=content_sha256,
+            idempotency_key=idempotency_key,
+            correlation_id=correlation_id_ctx.get(),
+            max_retries=settings.job_max_retries,
+            max_queue_depth=settings.max_queue_depth,
+            job_type=JobType.PACKAGE,
+            callback_url=checked_callback_url,
+            extra_metadata={"package_request": package_options},
+        )
+    except Exception:
+        storage.purge_job_artifacts(job_id)
+        raise
+    logger.info(
+        "Accepted new package job",
+        extra={"job_id": job.job_id, "entry_count": len(entries)},
+    )
+    return _build_submit_response(job, idempotent_replay=False)
+
+
+def _package_result_schema(job: JobEntity) -> PackageResultSchema | None:
+    data = job.metadata_json.get("package")
+    if job.job_type != JobType.PACKAGE or not data:
+        return None
+    return PackageResultSchema(
+        entry_count=data.get("entry_count", 0),
+        ok_count=data.get("ok_count", 0),
+        error_count=data.get("error_count", 0),
+        total_bytes=data.get("total_bytes", 0),
+        parts=[
+            PackagePartSchema(
+                **p, download_url=f"/api/v1/jobs/{job.job_id}/packages/{p['part_no']}"
+            )
+            for p in data.get("parts", [])
+        ],
+        errors=[PackageSkippedFileSchema(**e) for e in data.get("errors", [])],
+        errors_truncated=bool(data.get("errors_truncated")),
+    )
+
+
+@router.get(
+    "/jobs/{job_id}/packages/{part_no}",
+    response_class=FileResponse,
+    summary="Download one zip part of a completed package job (supports Range requests)",
+)
+def download_package_part(
+    job_id: str,
+    part_no: int,
+    storage: Annotated[LocalJobStorage, Depends(get_job_storage)],
+    repo: Annotated[JobRepository, Depends(get_job_repository)],
+) -> FileResponse:
+    storage.validate_job_id(job_id)
+    job = repo.get_job(job_id)
+    if job.job_type != JobType.PACKAGE:
+        raise ValidationError(f"Job {job_id!r} is not a package job.", code="NOT_A_PACKAGE_JOB")
+    _assert_job_completed(job)
+
+    parts = (job.metadata_json.get("package") or {}).get("parts", [])
+    part = next((p for p in parts if p.get("part_no") == part_no), None)
+    if part is None:
+        raise JobNotFoundError(f"Package part {part_no} of job {job_id!r} does not exist.")
+    path = package_part_path(storage, job_id, part["filename"])
+    if not path.exists():
+        raise JobExpiredError(f"Package part {part_no} of job {job_id!r} is no longer on disk.")
+    return FileResponse(
+        path=path,
+        media_type="application/zip",
+        filename=part["filename"],
+        content_disposition_type="attachment",
+    )
+
+
+@router.delete(
+    "/jobs/{job_id}",
+    response_model=JobDeleteResponse,
+    summary="Delete a job's artifacts now (cancels it first if still running)",
+)
+def delete_job(
+    job_id: str,
+    settings: Annotated[Settings, Depends(get_app_settings)],
+    storage: Annotated[LocalJobStorage, Depends(get_job_storage)],
+    repo: Annotated[JobRepository, Depends(get_job_repository)],
+) -> JobDeleteResponse:
+    """Free disk space before retention would; used when a user deletes an export."""
+    storage.validate_job_id(job_id)
+    job = repo.get_job(job_id)
+    if job.status in (JobStatus.QUEUED, JobStatus.PROCESSING):
+        updated = repo.request_cancel(job_id)
+        if updated.status == JobStatus.CANCELLED:
+            storage.purge_job_artifacts(job_id)
+            return JobDeleteResponse(
+                job_id=job_id, status=updated.status, message="Job cancelled and artifacts purged."
+            )
+        return JobDeleteResponse(
+            job_id=job_id,
+            status=updated.status,
+            message="Cancellation requested; the worker purges artifacts when it stops.",
+        )
+    if job.status != JobStatus.EXPIRED:
+        repo.mark_job_expired(job_id, metadata_retention_days=settings.metadata_retention_days)
+    storage.purge_job_artifacts(job_id)
+    return JobDeleteResponse(job_id=job_id, status=JobStatus.EXPIRED, message="Job artifacts purged.")
+
+
 def _build_options(
     settings: Settings,
     *,
@@ -412,7 +609,7 @@ def get_job_status(
     elif job.page_count > 0:
         progress = round(min(99.0, (job.completed_pages / job.page_count) * 100.0), 1)
 
-    is_done = job.status == JobStatus.COMPLETED
+    is_done = job.status == JobStatus.COMPLETED and job.job_type == JobType.OCR
     return JobStatusResponse(
         job_id=job.job_id,
         job_type=job.job_type,
@@ -440,6 +637,7 @@ def get_job_status(
         result_url=f"/api/v1/jobs/{job.job_id}/result" if is_done else None,
         pages_url=f"/api/v1/jobs/{job.job_id}/pages" if is_done else None,
         metadata_url=f"/api/v1/jobs/{job.job_id}/metadata",
+        package=_package_result_schema(job),
     )
 
 

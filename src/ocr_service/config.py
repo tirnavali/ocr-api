@@ -116,6 +116,18 @@ class Settings(BaseSettings):
     package_retention_hours: float = Field(
         default=168.0, gt=0.0, le=8760.0, alias="PACKAGE_RETENTION_HOURS"
     )
+    package_job_timeout_seconds: int = Field(
+        default=21600, ge=60, le=172800, alias="PACKAGE_JOB_TIMEOUT_SECONDS"
+    )
+    max_package_entries: int = Field(
+        default=100_000, ge=1, le=500_000, alias="MAX_PACKAGE_ENTRIES"
+    )
+    max_package_file_mb: int = Field(
+        default=2048, ge=1, le=65536, alias="MAX_PACKAGE_FILE_MB"
+    )
+    max_package_part_mb: int = Field(
+        default=4096, ge=1, le=65536, alias="MAX_PACKAGE_PART_MB"
+    )
 
     # Internal CDN Source Fetching (job inputs referenced by CDN path instead of upload)
     cdn_base_url: str | None = Field(default=None, alias="CDN_BASE_URL")
@@ -212,6 +224,12 @@ class Settings(BaseSettings):
         if job_type == JobType.PACKAGE.value:
             return self.max_concurrent_package_jobs
         return self.max_concurrent_jobs
+
+    def job_timeout_for(self, job_type: str) -> int:
+        """Wall-clock limit of one job attempt; packaging thousands of files takes hours."""
+        if job_type == JobType.PACKAGE.value:
+            return self.package_job_timeout_seconds
+        return self.job_timeout_seconds
 
     def retention_hours_for(self, job_type: str) -> float:
         """How long completed artifacts of a job type are kept before expiry."""

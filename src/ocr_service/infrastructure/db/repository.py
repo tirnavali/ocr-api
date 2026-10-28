@@ -214,6 +214,7 @@ class JobRepository:
         job_type: JobType = JobType.OCR,
         source_refs: list[CdnSourceRef] | None = None,
         callback_url: str | None = None,
+        extra_metadata: dict[str, Any] | None = None,
     ) -> JobEntity:
         """Persist a new job in QUEUED state, enforcing queue backpressure (FR-02, FR-15).
 
@@ -265,7 +266,10 @@ class JobRepository:
                 next_retry_at=now,
                 created_at=now,
                 updated_at=now,
-                metadata_json={"events": [{"state": "queued", "at": now.isoformat()}]},
+                metadata_json={
+                    **(extra_metadata or {}),
+                    "events": [{"state": "queued", "at": now.isoformat()}],
+                },
             )
             sess.add(rec)
             sess.flush()
@@ -495,6 +499,27 @@ class JobRepository:
             rec.updated_at = now
             return bool(rec.cancel_requested or rec.status == JobStatus.CANCELLED.value)
 
+    def set_job_progress(self, job_id: str, *, total: int, completed: int) -> None:
+        """Record item progress (pages for OCR, files for packaging) for status polling."""
+        with self._db.session() as sess:
+            rec = sess.get(JobRecord, job_id)
+            if rec is None:
+                raise JobNotFoundError(f"Job {job_id!r} was not found.")
+            rec.page_count = total
+            rec.completed_pages = completed
+            rec.updated_at = utcnow()
+
+    def merge_job_metadata(self, job_id: str, data: dict[str, Any]) -> None:
+        """Shallow-merge keys into the job's metadata (e.g. a package result summary)."""
+        with self._db.session() as sess:
+            rec = sess.get(JobRecord, job_id)
+            if rec is None:
+                raise JobNotFoundError(f"Job {job_id!r} was not found.")
+            meta = dict(rec.metadata_json or {})
+            meta.update(data)
+            rec.metadata_json = meta
+            rec.updated_at = utcnow()
+
     def renew_job_lease(self, job_id: str, worker_id: str, lease_seconds: int) -> bool:
         """Extend the worker lease and check if cancellation was requested."""
         now = utcnow()
@@ -514,8 +539,8 @@ class JobRepository:
         page_count: int,
         processing_duration_ms: int,
         retention_hours: float,
-        pdfa_compliant: bool,
-        pdfa_validator: str,
+        pdfa_compliant: bool | None,
+        pdfa_validator: str | None,
         extra_metadata: dict[str, Any] | None = None,
     ) -> JobEntity:
         now = utcnow()

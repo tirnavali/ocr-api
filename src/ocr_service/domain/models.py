@@ -57,6 +57,24 @@ class CdnSourceRef:
         return cls(path=str(data["path"]), filename=str(data["filename"]))
 
 
+@dataclass(frozen=True, slots=True)
+class PackageEntry:
+    """One file of a package job: where to fetch it, its name inside the zip, caller's ref."""
+
+    path: str
+    name: str
+    ref: str = ""
+
+    def to_dict(self) -> dict[str, str]:
+        return {"path": self.path, "name": self.name, "ref": self.ref}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PackageEntry:
+        return cls(
+            path=str(data["path"]), name=str(data["name"]), ref=str(data.get("ref") or "")
+        )
+
+
 VALID_STATE_TRANSITIONS: dict[JobStatus, set[JobStatus]] = {
     JobStatus.QUEUED: {
         JobStatus.PROCESSING,

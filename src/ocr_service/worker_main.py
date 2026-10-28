@@ -22,6 +22,7 @@ from ocr_service.infrastructure.db.repository import JobRepository
 from ocr_service.infrastructure.storage.local_storage import LocalJobStorage
 from ocr_service.logging_config import configure_logging
 from ocr_service.pipeline.orchestrator import OcrPipelineOrchestrator
+from ocr_service.pipeline.packager import PackageJobHandler
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,11 @@ class OcrWorker:
             self._handlers[JobType.OCR.value] = orchestrator or OcrPipelineOrchestrator(
                 settings, repo, storage
             )
+        if (
+            JobType.PACKAGE.value in settings.worker_job_types
+            and JobType.PACKAGE.value not in self._handlers
+        ):
+            self._handlers[JobType.PACKAGE.value] = PackageJobHandler(settings, repo, storage)
         self._job_types = [t for t in settings.worker_job_types if t in self._handlers]
         missing = [t for t in settings.worker_job_types if t not in self._handlers]
         if missing:
