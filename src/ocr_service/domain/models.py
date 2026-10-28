@@ -20,6 +20,43 @@ class JobStatus(StrEnum):
     EXPIRED = "expired"
 
 
+TERMINAL_STATUSES: frozenset[JobStatus] = frozenset(
+    {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
+)
+
+
+class JobType(StrEnum):
+    """Kind of work a job performs; each type is claimed by its own worker pool."""
+
+    OCR = "ocr"
+    PACKAGE = "package"
+
+
+class CallbackStatus(StrEnum):
+    """Delivery state of the signed completion callback for a job."""
+
+    NONE = "none"  # no callback_url configured
+    WAITING = "waiting"  # job not terminal yet
+    PENDING = "pending"  # terminal; delivery due at callback_next_at
+    DELIVERED = "delivered"
+    FAILED = "failed"  # gave up after CALLBACK_MAX_ATTEMPTS
+
+
+@dataclass(frozen=True, slots=True)
+class CdnSourceRef:
+    """Job input referenced by its internal CDN path; the worker downloads it itself."""
+
+    path: str
+    filename: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"path": self.path, "filename": self.filename}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CdnSourceRef:
+        return cls(path=str(data["path"]), filename=str(data["filename"]))
+
+
 VALID_STATE_TRANSITIONS: dict[JobStatus, set[JobStatus]] = {
     JobStatus.QUEUED: {
         JobStatus.PROCESSING,
@@ -470,3 +507,9 @@ class JobEntity:
     expires_at: datetime | None = None
     updated_at: datetime | None = None
     metadata_json: dict[str, Any] = field(default_factory=dict)
+    job_type: JobType = JobType.OCR
+    source_refs: list[CdnSourceRef] = field(default_factory=list)
+    callback_url: str | None = None
+    callback_status: CallbackStatus = CallbackStatus.NONE
+    callback_attempts: int = 0
+    callback_last_error: str | None = None

@@ -7,7 +7,52 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ocr_service.domain.models import DpiSource, JobStatus, PdfAProfile
+from ocr_service.domain.models import (
+    CallbackStatus,
+    DpiSource,
+    JobStatus,
+    JobType,
+    LayoutMode,
+    NlpMode,
+    PdfAProfile,
+)
+
+
+class CdnSourceSchema(BaseModel):
+    path: str = Field(
+        ...,
+        min_length=1,
+        max_length=1024,
+        description="CDN-relative file path, e.g. 'AOS\\\\ab\\\\cd\\\\belge.pdf'.",
+    )
+    filename: str | None = Field(
+        default=None,
+        max_length=255,
+        description="Original file name; defaults to the last path segment.",
+    )
+
+
+class CdnOcrJobRequest(BaseModel):
+    """OCR job whose inputs the worker downloads from the internal CDN (no upload)."""
+
+    sources: list[CdnSourceSchema] = Field(
+        ..., min_length=1, max_length=500, description="1 PDF or 1..N images on the CDN."
+    )
+    language: str | None = None
+    force_ocr: bool | None = None
+    working_dpi: int | None = Field(default=None, ge=100, le=600)
+    preserve_source_images: bool | None = None
+    deskew_working_image: bool | None = None
+    layout_mode: LayoutMode = LayoutMode.AUTO
+    pdfa_profile: PdfAProfile | None = None
+    enable_nlp: bool = False
+    nlp_mode: NlpMode = NlpMode.OFF
+    custom_topics: list[str] = Field(default_factory=list)
+    callback_url: str | None = Field(
+        default=None,
+        max_length=512,
+        description="Receives a signed POST when the job reaches a terminal state.",
+    )
 
 
 class ErrorDetailSchema(BaseModel):
@@ -41,7 +86,11 @@ class JobSubmitResponse(BaseModel):
 
 class JobStatusResponse(BaseModel):
     job_id: str
+    job_type: JobType = JobType.OCR
     status: JobStatus
+    callback_status: CallbackStatus = CallbackStatus.NONE
+    callback_attempts: int = 0
+    callback_last_error: str | None = None
     page_count: int = 0
     completed_pages: int = 0
     progress_percent: float = 0.0

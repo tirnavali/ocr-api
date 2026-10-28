@@ -24,15 +24,17 @@ from ocr_service.exceptions import (
     JobTimeoutError,
     OcrServiceError,
     PdfAConformanceError,
+    ValidationError,
 )
+from ocr_service.infrastructure.cdn.cdn_client import InternalCdnClient
 from ocr_service.infrastructure.db.repository import JobRepository
-from ocr_service.infrastructure.storage.local_storage import LocalJobStorage
+from ocr_service.infrastructure.storage.local_storage import LocalJobStorage, sanitize_filename
 from ocr_service.logging_config import correlation_id_ctx, job_id_ctx
 from ocr_service.pipeline.geometry import (
     source_bbox_to_pdf_points,
     working_bbox_to_source_bbox,
 )
-from ocr_service.pipeline.inspector import DocumentInspector
+from ocr_service.pipeline.inspector import DocumentInspector, detect_file_format_by_magic
 from ocr_service.pipeline.layout import analyze_layout_and_reading_order
 from ocr_service.pipeline.ocr_engine import TesseractOcrEngine
 from ocr_service.pipeline.pdfa_generator import PdfAGenerator
@@ -54,10 +56,12 @@ class OcrPipelineOrchestrator:
         ocr_engine: OcrEnginePort | None = None,
         pdfa_validator: PdfAValidatorPort | None = None,
         nlp_analyzer: TurkishNlpAnalyzerPort | None = None,
+        cdn_client: InternalCdnClient | None = None,
     ) -> None:
         self._settings = settings
         self._repo = repo
         self._storage = storage
+        self._cdn_client = cdn_client or InternalCdnClient(settings)
         self._inspector = DocumentInspector(settings)
         self._preprocessor = WorkingImagePreprocessor()
         self._ocr_engine = ocr_engine or TesseractOcrEngine(settings)
@@ -74,6 +78,8 @@ class OcrPipelineOrchestrator:
         try:
             paths = self._storage.get_job_paths(job.job_id, create=True)
             input_paths = self._repo.get_job_input_paths(job.job_id)
+            if job.source_refs and not (input_paths and all(p.exists() for p in input_paths)):
+                input_paths = self._fetch_cdn_inputs(job, paths.input_dir, worker_id, job_start_ns)
 
             logger.info(
                 "Starting OCR job execution",
@@ -199,7 +205,7 @@ class OcrPipelineOrchestrator:
                 job_id=job.job_id,
                 page_count=total_pages,
                 processing_duration_ms=total_duration_ms,
-                retention_hours=self._settings.result_retention_hours,
+                retention_hours=self._settings.retention_hours_for(job.job_type.value),
                 pdfa_compliant=validation_report.compliant,
                 pdfa_validator=validation_report.validator_used,
                 extra_metadata={
@@ -409,6 +415,41 @@ class OcrPipelineOrchestrator:
         finally:
             if prepared.working_image_path.exists():
                 prepared.working_image_path.unlink(missing_ok=True)
+
+    def _fetch_cdn_inputs(
+        self,
+        job: JobEntity,
+        input_dir: Path,
+        worker_id: str,
+        job_start_ns: int,
+    ) -> list[Path]:
+        """Download CDN-referenced inputs into the job's input dir and apply upload validation.
+
+        Downloads are re-done on a retry if any file is missing, so a crash mid-download
+        never leaves a job with a truncated input.
+        """
+        self._storage.check_storage_capacity()
+        input_paths: list[Path] = []
+        for index, ref in enumerate(job.source_refs):
+            self._check_timeout_and_cancellation(job.job_id, worker_id, job_start_ns)
+            dest = input_dir / f"{index:04d}_{sanitize_filename(ref.filename)}"
+            size = self._cdn_client.download_to(
+                ref.path, dest, max_bytes=self._settings.max_upload_bytes
+            )
+            logger.info(
+                "Fetched CDN input", extra={"cdn_path": ref.path, "size_bytes": size}
+            )
+            input_paths.append(dest)
+
+        detected_formats = [detect_file_format_by_magic(p) for p in input_paths]
+        if "PDF" in detected_formats and len(input_paths) > 1:
+            raise ValidationError(
+                "Cannot combine a PDF with other files in a single job; "
+                "reference either 1 PDF or 1..N images.",
+                code="MIXED_PDF_AND_IMAGE_INPUTS",
+            )
+        self._repo.set_job_input_paths(job.job_id, input_paths)
+        return input_paths
 
     def _check_timeout_and_cancellation(
         self,

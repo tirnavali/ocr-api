@@ -10,11 +10,13 @@ import socket
 import time
 import uuid
 from types import FrameType
+from typing import Protocol
 
 import cv2
 
 from ocr_service.config import Settings, get_settings
-from ocr_service.domain.models import JobEntity
+from ocr_service.domain.models import JobEntity, JobType
+from ocr_service.infrastructure.callbacks.notifier import CallbackNotifier
 from ocr_service.infrastructure.db.database import DatabaseSessionManager
 from ocr_service.infrastructure.db.repository import JobRepository
 from ocr_service.infrastructure.storage.local_storage import LocalJobStorage
@@ -22,6 +24,14 @@ from ocr_service.logging_config import configure_logging
 from ocr_service.pipeline.orchestrator import OcrPipelineOrchestrator
 
 logger = logging.getLogger(__name__)
+
+CALLBACK_POLL_INTERVAL_SECONDS = 5.0
+
+
+class JobHandler(Protocol):
+    """Executes one claimed job of a given type and returns its updated state."""
+
+    def execute_job(self, job: JobEntity, worker_id: str) -> JobEntity: ...
 
 
 class RetentionAndRecoveryJanitor:
@@ -68,7 +78,11 @@ class RetentionAndRecoveryJanitor:
 
 
 class OcrWorker:
-    """Single worker instance polling the durable job queue with graceful shutdown."""
+    """Single worker instance polling the durable job queue with graceful shutdown.
+
+    A worker only claims the job types in ``WORKER_JOB_TYPES`` that it has a handler for,
+    so OCR and other job types run in separate worker pools.
+    """
 
     def __init__(
         self,
@@ -77,12 +91,29 @@ class OcrWorker:
         storage: LocalJobStorage,
         orchestrator: OcrPipelineOrchestrator | None = None,
         worker_id: str | None = None,
+        handlers: dict[str, JobHandler] | None = None,
+        notifier: CallbackNotifier | None = None,
     ) -> None:
         self._settings = settings
         self._repo = repo
         self._storage = storage
-        self._orchestrator = orchestrator or OcrPipelineOrchestrator(settings, repo, storage)
+        self._handlers: dict[str, JobHandler] = dict(handlers or {})
+        if JobType.OCR.value in settings.worker_job_types and JobType.OCR.value not in self._handlers:
+            self._handlers[JobType.OCR.value] = orchestrator or OcrPipelineOrchestrator(
+                settings, repo, storage
+            )
+        self._job_types = [t for t in settings.worker_job_types if t in self._handlers]
+        missing = [t for t in settings.worker_job_types if t not in self._handlers]
+        if missing:
+            logger.warning(
+                "No handler registered for configured job types; they will not be claimed",
+                extra={"job_types": missing},
+            )
+        self._max_concurrent_by_type = {
+            t: settings.max_concurrent_jobs_for(t) for t in self._job_types
+        }
         self._janitor = RetentionAndRecoveryJanitor(settings, repo, storage)
+        self._notifier = notifier or CallbackNotifier(settings, repo)
         self.worker_id = (
             worker_id or f"worker-{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
         )
@@ -94,10 +125,14 @@ class OcrWorker:
 
     def process_next_available_job(self) -> JobEntity | None:
         """Claim and execute a single queued job if available (useful for synchronous test runs)."""
+        if not self._job_types:
+            return None
         job = self._repo.claim_next_job(
             worker_id=self.worker_id,
             lease_seconds=self._settings.worker_lease_seconds,
             max_concurrent_jobs=self._settings.max_concurrent_jobs,
+            job_types=self._job_types,
+            max_concurrent_by_type=self._max_concurrent_by_type,
         )
         if job is None:
             return None
@@ -105,11 +140,20 @@ class OcrWorker:
         self._repo.record_worker_heartbeat(
             self.worker_id, status="processing", active_job_id=job.job_id
         )
-        result = self._orchestrator.execute_job(job, worker_id=self.worker_id)
+        result = self._handlers[job.job_type.value].execute_job(job, worker_id=self.worker_id)
         self._repo.record_worker_heartbeat(
             self.worker_id, status="idle", active_job_id=None, increment_processed=True
         )
+        # Notify right away instead of waiting for the next callback poll.
+        self.deliver_callbacks()
         return result
+
+    def deliver_callbacks(self) -> int:
+        try:
+            return self._notifier.deliver_due()
+        except Exception:
+            logger.exception("Error while delivering job callbacks")
+            return 0
 
     def run_forever(self) -> None:
         """Run the polling and maintenance loop until graceful shutdown is requested."""
@@ -124,11 +168,13 @@ class OcrWorker:
             extra={
                 "worker_id": self.worker_id,
                 "threads_per_worker": self._settings.ocr_threads_per_worker,
+                "job_types": self._job_types,
             },
         )
 
         last_cleanup = 0.0
         last_heartbeat = 0.0
+        last_callback_poll = 0.0
 
         while not self._stop_requested:
             now = time.monotonic()
@@ -142,6 +188,12 @@ class OcrWorker:
                 except Exception:
                     logger.exception("Error during janitor maintenance cycle")
                 last_cleanup = now
+
+            # Retries of failed callbacks (and callbacks of jobs another process finished
+            # or the janitor failed) are picked up here.
+            if now - last_callback_poll >= CALLBACK_POLL_INTERVAL_SECONDS:
+                self.deliver_callbacks()
+                last_callback_poll = now
 
             try:
                 processed = self.process_next_available_job()
@@ -162,7 +214,8 @@ def _worker_process_target(worker_index: int) -> None:
     db = DatabaseSessionManager(settings)
     repo = JobRepository(db)
     storage = LocalJobStorage(settings)
-    worker_id = f"worker-{worker_index:02d}-{os.getpid()}"
+    pool = "+".join(settings.worker_job_types)
+    worker_id = f"worker-{pool}-{worker_index:02d}-{os.getpid()}"
     worker = OcrWorker(settings, repo, storage, worker_id=worker_id)
     try:
         worker.run_forever()

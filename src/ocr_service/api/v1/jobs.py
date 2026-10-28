@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import uuid
 from typing import Annotated
@@ -18,6 +20,7 @@ from ocr_service.api.dependencies import (
 from ocr_service.api.schemas import (
     BBoxPtSchema,
     BBoxPxSchema,
+    CdnOcrJobRequest,
     JobCancelResponse,
     JobMetadataResponse,
     JobPagesListResponse,
@@ -31,9 +34,11 @@ from ocr_service.api.schemas import (
 )
 from ocr_service.config import Settings
 from ocr_service.domain.models import (
+    CdnSourceRef,
     JobEntity,
     JobStatus,
     JobSubmissionOptions,
+    JobType,
     LayoutMode,
     NlpMode,
     PageOcrResult,
@@ -44,6 +49,8 @@ from ocr_service.exceptions import (
     JobNotReadyError,
     ValidationError,
 )
+from ocr_service.infrastructure.callbacks.notifier import validate_callback_url
+from ocr_service.infrastructure.cdn.cdn_client import normalize_cdn_path
 from ocr_service.infrastructure.db.repository import JobRepository
 from ocr_service.infrastructure.storage.local_storage import LocalJobStorage, sanitize_filename
 from ocr_service.logging_config import correlation_id_ctx
@@ -185,6 +192,10 @@ def submit_ocr_job(
         str | None,
         Form(description="Optional comma-separated custom Turkish topic labels to score."),
     ] = None,
+    callback_url: Annotated[
+        str | None,
+        Form(description="Receives a signed POST when the job reaches a terminal state."),
+    ] = None,
     idempotency_key: Annotated[
         str | None,
         Header(alias="Idempotency-Key", description="Optional client idempotency key."),
@@ -193,6 +204,7 @@ def submit_ocr_job(
     """Validate uploaded files, persist to isolated job storage, and enqueue durable OCR job."""
     if not files:
         raise ValidationError("At least one input file must be uploaded.", code="NO_INPUT_FILES")
+    checked_callback_url = validate_callback_url(settings, callback_url)
 
     job_id = f"job-{uuid.uuid4().hex}"
     upload_streams = [
@@ -227,21 +239,16 @@ def submit_ocr_job(
         if custom_topics
         else []
     )
-    options = JobSubmissionOptions(
-        language=language or settings.ocr_language,
-        force_ocr=settings.ocr_force if force_ocr is None else force_ocr,
-        working_dpi=working_dpi or settings.ocr_working_dpi,
-        preserve_source_images=(
-            settings.preserve_source_images
-            if preserve_source_images is None
-            else preserve_source_images
-        ),
-        deskew_working_image=(
-            settings.deskew_working_image if deskew_working_image is None else deskew_working_image
-        ),
+    options = _build_options(
+        settings,
+        language=language,
+        force_ocr=force_ocr,
+        working_dpi=working_dpi,
+        preserve_source_images=preserve_source_images,
+        deskew_working_image=deskew_working_image,
         layout_mode=layout_mode,
-        pdfa_profile=pdfa_profile or PdfAProfile(settings.pdf_a_profile),
-        enable_nlp=enable_nlp and (nlp_mode != NlpMode.OFF),
+        pdfa_profile=pdfa_profile,
+        enable_nlp=enable_nlp,
         nlp_mode=nlp_mode,
         custom_topics=parsed_custom_topics,
     )
@@ -257,6 +264,7 @@ def submit_ocr_job(
             correlation_id=correlation_id_ctx.get(),
             max_retries=settings.job_max_retries,
             max_queue_depth=settings.max_queue_depth,
+            callback_url=checked_callback_url,
         )
     except Exception:
         storage.purge_job_artifacts(job_id)
@@ -272,6 +280,117 @@ def submit_ocr_job(
         },
     )
     return _build_submit_response(job, idempotent_replay=False)
+
+
+@router.post(
+    "/jobs/from-cdn",
+    response_model=JobSubmitResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Submit an OCR job whose inputs are fetched from the internal CDN",
+)
+def submit_cdn_ocr_job(
+    request: CdnOcrJobRequest,
+    settings: Annotated[Settings, Depends(get_app_settings)],
+    repo: Annotated[JobRepository, Depends(get_job_repository)],
+    idempotency_key: Annotated[
+        str | None,
+        Header(alias="Idempotency-Key", description="Optional client idempotency key."),
+    ] = None,
+) -> JobSubmitResponse:
+    """Enqueue an OCR job by CDN reference; the worker downloads the files itself.
+
+    Nothing is downloaded here, so the API process stays light and the caller never has
+    to stream the document through itself.
+    """
+    if not (settings.cdn_base_url and settings.cdn_verification_id):
+        raise ValidationError(
+            "CDN inputs are disabled: CDN_BASE_URL and CDN_VERIFICATION_ID are not configured.",
+            code="CDN_NOT_CONFIGURED",
+        )
+    checked_callback_url = validate_callback_url(settings, request.callback_url)
+
+    refs: list[CdnSourceRef] = []
+    for src in request.sources:
+        normalized = normalize_cdn_path(src.path)
+        filename = src.filename or normalized.rsplit("/", 1)[-1]
+        refs.append(CdnSourceRef(path=src.path.strip(), filename=filename))
+
+    # The CDN paths identify the content for idempotency (the bytes are not fetched yet).
+    content_sha256 = hashlib.sha256(
+        json.dumps([r.path for r in refs], ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    if idempotency_key:
+        existing = repo.find_idempotent_job(idempotency_key, content_sha256)
+        if existing is not None:
+            return _build_submit_response(existing, idempotent_replay=True)
+
+    options = _build_options(
+        settings,
+        language=request.language,
+        force_ocr=request.force_ocr,
+        working_dpi=request.working_dpi,
+        preserve_source_images=request.preserve_source_images,
+        deskew_working_image=request.deskew_working_image,
+        layout_mode=request.layout_mode,
+        pdfa_profile=request.pdfa_profile,
+        enable_nlp=request.enable_nlp,
+        nlp_mode=request.nlp_mode,
+        custom_topics=[t.strip() for t in request.custom_topics if t.strip()],
+    )
+    job = repo.enqueue_job(
+        job_id=f"job-{uuid.uuid4().hex}",
+        options=options,
+        input_filenames=[r.filename for r in refs],
+        input_paths=[],
+        content_sha256=content_sha256,
+        idempotency_key=idempotency_key,
+        correlation_id=correlation_id_ctx.get(),
+        max_retries=settings.job_max_retries,
+        max_queue_depth=settings.max_queue_depth,
+        job_type=JobType.OCR,
+        source_refs=refs,
+        callback_url=checked_callback_url,
+    )
+    logger.info(
+        "Accepted new CDN-referenced OCR job",
+        extra={"job_id": job.job_id, "source_count": len(refs)},
+    )
+    return _build_submit_response(job, idempotent_replay=False)
+
+
+def _build_options(
+    settings: Settings,
+    *,
+    language: str | None,
+    force_ocr: bool | None,
+    working_dpi: int | None,
+    preserve_source_images: bool | None,
+    deskew_working_image: bool | None,
+    layout_mode: LayoutMode,
+    pdfa_profile: PdfAProfile | None,
+    enable_nlp: bool,
+    nlp_mode: NlpMode,
+    custom_topics: list[str],
+) -> JobSubmissionOptions:
+    """Merge per-request OCR options with service defaults."""
+    return JobSubmissionOptions(
+        language=language or settings.ocr_language,
+        force_ocr=settings.ocr_force if force_ocr is None else force_ocr,
+        working_dpi=working_dpi or settings.ocr_working_dpi,
+        preserve_source_images=(
+            settings.preserve_source_images
+            if preserve_source_images is None
+            else preserve_source_images
+        ),
+        deskew_working_image=(
+            settings.deskew_working_image if deskew_working_image is None else deskew_working_image
+        ),
+        layout_mode=layout_mode,
+        pdfa_profile=pdfa_profile or PdfAProfile(settings.pdf_a_profile),
+        enable_nlp=enable_nlp and (nlp_mode != NlpMode.OFF),
+        nlp_mode=nlp_mode,
+        custom_topics=custom_topics,
+    )
 
 
 @router.get(
@@ -296,7 +415,11 @@ def get_job_status(
     is_done = job.status == JobStatus.COMPLETED
     return JobStatusResponse(
         job_id=job.job_id,
+        job_type=job.job_type,
         status=job.status,
+        callback_status=job.callback_status,
+        callback_attempts=job.callback_attempts,
+        callback_last_error=job.callback_last_error,
         page_count=job.page_count,
         completed_pages=job.completed_pages,
         progress_percent=progress,

@@ -7,7 +7,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, create_engine, event, inspect, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from ocr_service.config import Settings
@@ -44,7 +45,43 @@ def create_db_engine(settings: Settings) -> Engine:
             cursor.close()
 
     Base.metadata.create_all(bind=engine)
+    _apply_additive_schema_upgrades(engine)
     return engine
+
+
+def _apply_additive_schema_upgrades(engine: Engine) -> None:
+    """Add columns and indexes introduced after a database file was first created.
+
+    ``create_all`` only creates missing tables, so an existing state database keeps its old
+    columns. New columns are always nullable or carry a server default, which makes plain
+    ``ALTER TABLE ... ADD COLUMN`` safe. API and worker processes start concurrently, so a
+    "duplicate column" race from another process is expected and ignored.
+    """
+    inspector = inspect(engine)
+    for table in Base.metadata.sorted_tables:
+        if not inspector.has_table(table.name):
+            continue
+        existing = {c["name"] for c in inspector.get_columns(table.name)}
+        for column in table.columns:
+            if column.name in existing:
+                continue
+            col_type = column.type.compile(dialect=engine.dialect)
+            ddl = f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {col_type}'
+            if column.server_default is not None:
+                default_sql = column.server_default.arg  # type: ignore[attr-defined]
+                ddl += f" NOT NULL DEFAULT '{default_sql}'"
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text(ddl))
+            except OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
+        for index in table.indexes:
+            try:
+                index.create(bind=engine, checkfirst=True)
+            except OperationalError as exc:
+                if "already exists" not in str(exc).lower():
+                    raise
 
 
 class DatabaseSessionManager:

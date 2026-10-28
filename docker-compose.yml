@@ -24,6 +24,10 @@ services:
       MAX_CONCURRENT_JOBS: "${MAX_CONCURRENT_JOBS:-10}"
       MAX_QUEUE_DEPTH: "${MAX_QUEUE_DEPTH:-500}"
       TEMP_STORAGE_PATH: "/data/ocr"
+      CDN_BASE_URL: "${CDN_BASE_URL:-}"
+      CDN_VERIFICATION_ID: "${CDN_VERIFICATION_ID:-}"
+      CALLBACK_HMAC_SECRET: "${CALLBACK_HMAC_SECRET:-}"
+      CALLBACK_ALLOWED_PREFIXES: "${CALLBACK_ALLOWED_PREFIXES:-}"
     volumes:
       - ocr_shared_data:/data/ocr
     read_only: true
@@ -51,6 +55,7 @@ services:
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       LOG_JSON: "true"
       OCR_LANGUAGE: "${OCR_LANGUAGE:-tur}"
+      WORKER_JOB_TYPES: "ocr"
       OCR_WORKER_COUNT: "${OCR_WORKER_COUNT:-10}"
       OCR_THREADS_PER_WORKER: "${OCR_THREADS_PER_WORKER:-1}"
       OCR_WORKING_DPI: "${OCR_WORKING_DPI:-300}"
@@ -63,6 +68,12 @@ services:
       PDF_A_PROFILE: "${PDF_A_PROFILE:-PDF/A-2b}"
       PRESERVE_SOURCE_IMAGES: "true"
       DESKEW_WORKING_IMAGE: "true"
+      CDN_BASE_URL: "${CDN_BASE_URL:-}"
+      CDN_VERIFICATION_ID: "${CDN_VERIFICATION_ID:-}"
+      CDN_VERIFY_TLS: "${CDN_VERIFY_TLS:-true}"
+      CALLBACK_HMAC_SECRET: "${CALLBACK_HMAC_SECRET:-}"
+      CALLBACK_ALLOWED_PREFIXES: "${CALLBACK_ALLOWED_PREFIXES:-}"
+      CALLBACK_VERIFY_TLS: "${CALLBACK_VERIFY_TLS:-true}"
     volumes:
       - ocr_shared_data:/data/ocr
     read_only: true

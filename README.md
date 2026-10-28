@@ -23,7 +23,8 @@ Interactive OpenAPI / Swagger UI is served at `/docs` and ReDoc at `/redoc`.
 
 | Method | Endpoint | Status | Description |
 | :--- | :--- | :--- | :--- |
-| `POST` | `/api/v1/jobs` *(alias `/api/v1/ocr/jobs`)* | `202 Accepted` | Upload 1 PDF or 1..N images (`JPEG`, `PNG`, single/multipage `TIFF`). Supports `Idempotency-Key` header. |
+| `POST` | `/api/v1/jobs` *(alias `/api/v1/ocr/jobs`)* | `202 Accepted` | Upload 1 PDF or 1..N images (`JPEG`, `PNG`, single/multipage `TIFF`). Supports `Idempotency-Key` header and optional `callback_url` form field. |
+| `POST` | `/api/v1/jobs/from-cdn` | `202 Accepted` | JSON body with `sources: [{path, filename?}]` referencing files on the internal CDN; the worker downloads them itself (nothing is uploaded). Same options as upload plus `callback_url`. |
 | `GET` | `/api/v1/jobs/{job_id}` | `200 OK` | Poll job status (`queued`, `processing`, `completed`, `failed`, `cancelled`, `expired`) and page progress. |
 | `GET` | `/api/v1/jobs/{job_id}/result` | `200 OK` / `409` / `410` | Retrieve structured JSON result with per-page Turkish text, dimensions, DPI metadata, and optional word boxes (`?include_boxes=true`). |
 | `GET` | `/api/v1/jobs/{job_id}/pages` | `200 OK` | Retrieve paginated per-page OCR text and word geometry (`?page_start=1&page_end=5&include_boxes=true`). |
@@ -33,6 +34,34 @@ Interactive OpenAPI / Swagger UI is served at `/docs` and ReDoc at `/redoc`.
 | `GET` | `/api/v1/health/live` | `200 OK` | Container liveness check. |
 | `GET` | `/api/v1/health/ready` | `200 OK` / `503` | Readiness check verifying SQLite WAL write access, disk quota, and Tesseract `tur` language data. |
 | `GET` | `/api/v1/metrics` | `200 OK` | Queue depth, active jobs, page latency averages, error counters, CPU/RAM & storage metrics. |
+
+### 2.1 Job Types & Worker Pools
+
+Every job has a `job_type` (`ocr`, `package`). A worker process only claims the types listed in
+`WORKER_JOB_TYPES`, so each type runs in its own pool. Concurrency (`MAX_CONCURRENT_JOBS` for OCR,
+`MAX_CONCURRENT_PACKAGE_JOBS` for packaging), queue backpressure and retention
+(`RESULT_RETENTION_HOURS` / `PACKAGE_RETENTION_HOURS`) are all applied per type. Existing state
+databases are upgraded in place on startup (new columns and indexes are added).
+
+### 2.2 CDN Inputs
+
+`POST /api/v1/jobs/from-cdn` requires `CDN_BASE_URL` and `CDN_VERIFICATION_ID`. Paths are
+CDN-relative (`AOS\ab\cd\file.pdf`); absolute URLs and `..` segments are rejected. The worker sends
+the same `UygulamaId` / `TokenTime` headers as the TBMM Framework client. A `404` from the CDN fails
+the job immediately (`CDN_SOURCE_NOT_FOUND`, no retries); network errors and `5xx` are retried.
+Note: the TBMM internal CDN currently answers a missing file with `500` and an empty body, so such
+jobs end as `CDN_FETCH_FAILED` after `JOB_MAX_RETRIES` retries rather than failing on the first try.
+
+### 2.3 Signed Completion Callbacks
+
+If a job has a `callback_url` (must start with one of `CALLBACK_ALLOWED_PREFIXES`), the service POSTs
+a JSON summary when the job becomes `completed`, `failed` or `cancelled`. Delivery uses a durable
+outbox: failures are retried with exponential backoff up to `CALLBACK_MAX_ATTEMPTS`, and the
+delivery state is visible as `callback_status` on `GET /api/v1/jobs/{job_id}`.
+
+Receivers must verify `X-Ocr-Signature: sha256=<hex>` = HMAC-SHA256(`CALLBACK_HMAC_SECRET`,
+`"<X-Ocr-Timestamp>." + raw_body`) and treat callbacks idempotently by `job_id` (a callback may
+arrive more than once).
 
 ---
 

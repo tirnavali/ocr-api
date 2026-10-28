@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import socket
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -14,10 +15,13 @@ from sqlalchemy import delete, func, select, text
 from ocr_service.domain.models import (
     BBoxPt,
     BBoxPx,
+    CallbackStatus,
+    CdnSourceRef,
     DpiSource,
     JobEntity,
     JobStatus,
     JobSubmissionOptions,
+    JobType,
     PageNlpAnalysis,
     PageOcrResult,
     WordBox,
@@ -45,6 +49,17 @@ def _ensure_utc(dt: datetime | None) -> datetime | None:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=UTC)
     return dt.astimezone(UTC)
+
+
+def _arm_callback_on_terminal(rec: JobRecord, now: datetime) -> None:
+    """Queue the completion callback once a job reaches a terminal state (outbox pattern).
+
+    Called in the same transaction that writes the terminal status, so a crash between the
+    state change and the HTTP delivery can never lose the notification.
+    """
+    if rec.callback_url and rec.callback_status == CallbackStatus.WAITING.value:
+        rec.callback_status = CallbackStatus.PENDING.value
+        rec.callback_next_at = now
 
 
 class JobRepository:
@@ -81,6 +96,12 @@ class JobRepository:
             expires_at=_ensure_utc(rec.expires_at),
             updated_at=_ensure_utc(rec.updated_at),
             metadata_json=dict(rec.metadata_json or {}),
+            job_type=JobType(rec.job_type or JobType.OCR.value),
+            source_refs=[CdnSourceRef.from_dict(r) for r in (rec.source_refs_json or [])],
+            callback_url=rec.callback_url,
+            callback_status=CallbackStatus(rec.callback_status or CallbackStatus.NONE.value),
+            callback_attempts=rec.callback_attempts or 0,
+            callback_last_error=rec.callback_last_error,
         )
 
     @staticmethod
@@ -190,14 +211,22 @@ class JobRepository:
         correlation_id: str,
         max_retries: int,
         max_queue_depth: int,
+        job_type: JobType = JobType.OCR,
+        source_refs: list[CdnSourceRef] | None = None,
+        callback_url: str | None = None,
     ) -> JobEntity:
-        """Persist a new job in QUEUED state, enforcing queue backpressure (FR-02, FR-15)."""
+        """Persist a new job in QUEUED state, enforcing queue backpressure (FR-02, FR-15).
+
+        Backpressure is counted per job type, so a large OCR backlog never blocks
+        submissions of other job types.
+        """
         now = utcnow()
         with self._db.session() as sess:
             queued_count = (
                 sess.execute(
                     select(func.count(JobRecord.job_id)).where(
-                        JobRecord.status == JobStatus.QUEUED.value
+                        JobRecord.status == JobStatus.QUEUED.value,
+                        JobRecord.job_type == job_type.value,
                     )
                 ).scalar_one()
                 or 0
@@ -205,11 +234,22 @@ class JobRepository:
             if queued_count >= max_queue_depth:
                 raise QueueBackpressureError(
                     f"Job queue depth ({queued_count}) reached maximum capacity ({max_queue_depth}).",
-                    details={"queued_jobs": queued_count, "max_queue_depth": max_queue_depth},
+                    details={
+                        "queued_jobs": queued_count,
+                        "max_queue_depth": max_queue_depth,
+                        "job_type": job_type.value,
+                    },
                 )
 
             rec = JobRecord(
                 job_id=job_id,
+                job_type=job_type.value,
+                source_refs_json=[r.to_dict() for r in (source_refs or [])],
+                callback_url=callback_url,
+                callback_status=(
+                    CallbackStatus.WAITING.value if callback_url else CallbackStatus.NONE.value
+                ),
+                callback_attempts=0,
                 status=JobStatus.QUEUED.value,
                 options_json=options.to_dict(),
                 input_filenames_json=input_filenames,
@@ -245,6 +285,15 @@ class JobRepository:
                 raise JobNotFoundError(f"Job {job_id!r} was not found.")
             return [Path(p) for p in (rec.input_paths_json or [])]
 
+    def set_job_input_paths(self, job_id: str, input_paths: list[Path]) -> None:
+        """Record the local paths of inputs the worker downloaded for a CDN-referenced job."""
+        with self._db.session() as sess:
+            rec = sess.get(JobRecord, job_id)
+            if rec is None:
+                raise JobNotFoundError(f"Job {job_id!r} was not found.")
+            rec.input_paths_json = [str(p) for p in input_paths]
+            rec.updated_at = utcnow()
+
     def get_job_pages(
         self,
         job_id: str,
@@ -269,26 +318,41 @@ class JobRepository:
         worker_id: str,
         lease_seconds: int,
         max_concurrent_jobs: int,
+        job_types: Collection[str] | None = None,
+        max_concurrent_by_type: dict[str, int] | None = None,
     ) -> JobEntity | None:
-        """Atomically claim the oldest eligible QUEUED job if active concurrency permits."""
+        """Atomically claim the oldest eligible QUEUED job if active concurrency permits.
+
+        Only ``job_types`` are considered (default: OCR). Concurrency is capped per job type:
+        ``max_concurrent_by_type[type]`` if given, otherwise ``max_concurrent_jobs``.
+        """
         now = utcnow()
         lease_until = now + timedelta(seconds=lease_seconds)
+        wanted_types = list(job_types) if job_types else [JobType.OCR.value]
+        caps = max_concurrent_by_type or {}
 
         with self._db.session() as sess:
             # Acquire immediate write lock on SQLite to prevent race conditions across processes
             if self._db.engine.dialect.name == "sqlite":
                 sess.execute(text("BEGIN IMMEDIATE"))
 
-            active_count = (
+            active_by_type = dict(
                 sess.execute(
-                    select(func.count(JobRecord.job_id)).where(
+                    select(JobRecord.job_type, func.count(JobRecord.job_id))
+                    .where(
                         JobRecord.status == JobStatus.PROCESSING.value,
                         JobRecord.lease_expires_at > now,
+                        JobRecord.job_type.in_(wanted_types),
                     )
-                ).scalar_one()
-                or 0
+                    .group_by(JobRecord.job_type)
+                ).all()
             )
-            if active_count >= max_concurrent_jobs:
+            eligible_types = [
+                t
+                for t in wanted_types
+                if active_by_type.get(t, 0) < caps.get(t, max_concurrent_jobs)
+            ]
+            if not eligible_types:
                 return None
 
             candidate = (
@@ -297,6 +361,7 @@ class JobRepository:
                     .where(
                         JobRecord.status == JobStatus.QUEUED.value,
                         JobRecord.next_retry_at <= now,
+                        JobRecord.job_type.in_(eligible_types),
                     )
                     .order_by(JobRecord.created_at.asc())
                     .limit(1)
@@ -311,6 +376,7 @@ class JobRepository:
                 candidate.status = JobStatus.CANCELLED.value
                 candidate.completed_at = now
                 candidate.updated_at = now
+                _arm_callback_on_terminal(candidate, now)
                 sess.flush()
                 return None
 
@@ -477,6 +543,7 @@ class JobRepository:
             rec.error_code = None
             rec.error_message = None
             rec.updated_at = now
+            _arm_callback_on_terminal(rec, now)
 
             meta = dict(rec.metadata_json or {})
             if extra_metadata:
@@ -537,6 +604,7 @@ class JobRepository:
                 rec.error_message = error_message
                 rec.retryable = retryable
                 rec.updated_at = now
+                _arm_callback_on_terminal(rec, now)
                 events.append(
                     {
                         "state": "failed",
@@ -577,6 +645,7 @@ class JobRepository:
                 rec.completed_at = now
                 rec.expires_at = now + timedelta(hours=retention_hours)
                 rec.lease_expires_at = None
+                _arm_callback_on_terminal(rec, now)
                 events.append({"state": "cancelled", "at": now.isoformat()})
             else:
                 events.append({"state": "cancel_requested", "at": now.isoformat()})
@@ -599,6 +668,7 @@ class JobRepository:
             rec.expires_at = now + timedelta(hours=retention_hours)
             rec.lease_expires_at = None
             rec.updated_at = now
+            _arm_callback_on_terminal(rec, now)
             meta = dict(rec.metadata_json or {})
             events = list(meta.get("events", []))
             events.append({"state": "cancelled", "at": now.isoformat()})
@@ -631,6 +701,7 @@ class JobRepository:
                     rec.completed_at = now
                     rec.expires_at = now + timedelta(hours=1.0)
                     rec.lease_expires_at = None
+                    _arm_callback_on_terminal(rec, now)
                     events.append({"state": "cancelled_after_stale_lease", "at": now.isoformat()})
                 elif rec.attempt_count <= rec.max_retries:
                     rec.status = JobStatus.QUEUED.value
@@ -659,6 +730,7 @@ class JobRepository:
                         f"Worker {rec.worker_id} terminated unexpectedly and max retries ({rec.max_retries}) exhausted."
                     )
                     rec.retryable = False
+                    _arm_callback_on_terminal(rec, now)
                     events.append(
                         {
                             "state": "failed_after_stale_lease",
@@ -717,6 +789,72 @@ class JobRepository:
             # Delete heavy per-page OCR text & word bounding boxes from DB upon artifact expiration
             sess.execute(delete(JobPageRecord).where(JobPageRecord.job_id == job_id))
             return True
+
+    def claim_due_callbacks(self, *, limit: int, lease_seconds: int) -> list[JobEntity]:
+        """Lease a batch of due callbacks so concurrent worker processes never send the same one.
+
+        The lease is just ``callback_next_at`` pushed into the future: if the sender dies
+        mid-delivery, the callback simply becomes due again after ``lease_seconds``.
+        """
+        now = utcnow()
+        with self._db.session() as sess:
+            if self._db.engine.dialect.name == "sqlite":
+                sess.execute(text("BEGIN IMMEDIATE"))
+            rows = (
+                sess.execute(
+                    select(JobRecord)
+                    .where(
+                        JobRecord.callback_status == CallbackStatus.PENDING.value,
+                        JobRecord.callback_next_at <= now,
+                    )
+                    .order_by(JobRecord.callback_next_at.asc())
+                    .limit(limit)
+                )
+                .scalars()
+                .all()
+            )
+            for rec in rows:
+                rec.callback_next_at = now + timedelta(seconds=lease_seconds)
+            sess.flush()
+            return [self._to_entity(r) for r in rows]
+
+    def record_callback_result(
+        self,
+        job_id: str,
+        *,
+        delivered: bool,
+        error: str | None,
+        max_attempts: int,
+        backoff_base_seconds: float = 5.0,
+        backoff_max_seconds: float = 3600.0,
+    ) -> CallbackStatus:
+        """Record one delivery attempt; schedule an exponential-backoff retry or give up."""
+        now = utcnow()
+        with self._db.session() as sess:
+            rec = sess.get(JobRecord, job_id)
+            if rec is None:
+                raise JobNotFoundError(f"Job {job_id!r} not found.")
+            rec.callback_attempts = (rec.callback_attempts or 0) + 1
+            if delivered:
+                rec.callback_status = CallbackStatus.DELIVERED.value
+                rec.callback_next_at = None
+                rec.callback_last_error = None
+            elif rec.callback_attempts >= max_attempts:
+                rec.callback_status = CallbackStatus.FAILED.value
+                rec.callback_next_at = None
+                rec.callback_last_error = error
+                logger.error(
+                    "Giving up on job completion callback",
+                    extra={"job_id": job_id, "attempts": rec.callback_attempts, "error": error},
+                )
+            else:
+                delay = min(
+                    backoff_max_seconds,
+                    backoff_base_seconds * (2 ** (rec.callback_attempts - 1)),
+                )
+                rec.callback_next_at = now + timedelta(seconds=delay)
+                rec.callback_last_error = error
+            return CallbackStatus(rec.callback_status)
 
     def record_worker_heartbeat(
         self,
