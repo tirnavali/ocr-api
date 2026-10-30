@@ -57,29 +57,21 @@ def _group_words_into_lines(words: list[WordBox], page_width_px: int) -> list[Re
     if not words:
         return []
 
-    # First check if Tesseract line tuples (block, par, line) are well-formed;
-    # however, in multi-column scans Tesseract sometimes merges words across adjacent columns
-    # into a single line if their Y coordinates align. We therefore split any line whose
-    # horizontal gap between consecutive words exceeds 3.0x median word height.
-    sorted_by_y = sorted(words, key=lambda w: (w.bbox_source_px.center_y, w.bbox_source_px.left))
-    heights = [w.bbox_source_px.height for w in sorted_by_y]
+    # As a safety net against a Tesseract line that still runs across a gutter, any line
+    # whose gap between consecutive words exceeds ~2.8x the median word height is split.
+    heights = [w.bbox_source_px.height for w in words]
     median_h = float(np.median(heights)) if heights else 20.0
     max_intra_line_gap = max(median_h * 2.8, page_width_px * 0.045)
 
-    raw_clusters: list[list[WordBox]] = []
-    for w in sorted_by_y:
-        placed = False
-        wy = w.bbox_source_px.center_y
-        wh = w.bbox_source_px.height
-        for cluster in reversed(raw_clusters[-15:]):
-            cy = sum(item.bbox_source_px.center_y for item in cluster) / len(cluster)
-            ch = sum(item.bbox_source_px.height for item in cluster) / len(cluster)
-            if abs(wy - cy) <= 0.55 * max(wh, ch):
-                cluster.append(w)
-                placed = True
-                break
-        if not placed:
-            raw_clusters.append([w])
+    # Tesseract's own page segmentation (block, par, line) already separates columns, even
+    # when the gutter is much narrower than the gap threshold above (e.g. ~20 px on a
+    # 800 px magazine scan). Grouping only by Y merged same-height lines of adjacent
+    # columns into one "spanning" line and interleaved the columns, so Tesseract's lines
+    # are used whenever the words carry them.
+    if any(w.line_num > 0 for w in words):
+        raw_clusters = _group_by_tesseract_line(words)
+    else:
+        raw_clusters = _group_by_vertical_position(words)
 
     lines: list[ReconstructedLine] = []
     for cluster in raw_clusters:
@@ -97,6 +89,33 @@ def _group_words_into_lines(words: list[WordBox], page_width_px: int) -> list[Re
             lines.append(_build_line(current_segment))
 
     return lines
+
+
+def _group_by_tesseract_line(words: list[WordBox]) -> list[list[WordBox]]:
+    clusters: dict[tuple[int, int, int], list[WordBox]] = {}
+    for w in words:
+        clusters.setdefault((w.block_num, w.par_num, w.line_num), []).append(w)
+    return list(clusters.values())
+
+
+def _group_by_vertical_position(words: list[WordBox]) -> list[list[WordBox]]:
+    """Fallback for words without Tesseract structure (e.g. restored or synthetic boxes)."""
+    sorted_by_y = sorted(words, key=lambda w: (w.bbox_source_px.center_y, w.bbox_source_px.left))
+    raw_clusters: list[list[WordBox]] = []
+    for w in sorted_by_y:
+        placed = False
+        wy = w.bbox_source_px.center_y
+        wh = w.bbox_source_px.height
+        for cluster in reversed(raw_clusters[-15:]):
+            cy = sum(item.bbox_source_px.center_y for item in cluster) / len(cluster)
+            ch = sum(item.bbox_source_px.height for item in cluster) / len(cluster)
+            if abs(wy - cy) <= 0.55 * max(wh, ch):
+                cluster.append(w)
+                placed = True
+                break
+        if not placed:
+            raw_clusters.append([w])
+    return raw_clusters
 
 
 def _build_line(words: list[WordBox]) -> ReconstructedLine:
@@ -137,7 +156,11 @@ def _detect_column_gutters(
     min_gutter_bins = max(3, int(bins * 0.015))
     min_col_bins = max(12, int(bins * 0.08))
 
-    occupied = hist > 0
+    # A few short headline/byline lines that happen to cross the gutter (e.g. a kicker
+    # line above the columns) must not close it, so bins covered by only a small share
+    # of the lines count as empty. For short pages the floor stays 0 (any coverage counts).
+    noise_floor = int(0.08 * int(hist.max()))
+    occupied = hist > noise_floor
     intervals: list[tuple[int, int]] = []
     start: int | None = None
     for idx, val in enumerate(occupied):
@@ -213,25 +236,55 @@ def analyze_layout_and_reading_order(
 
     columns = _detect_column_gutters(lines, page_width_px=page_width_px)
     num_cols = len(columns)
+    _assign_columns(lines, columns)
 
-    if num_cols <= 1:
-        lines.sort(key=lambda ln: (ln.top, ln.left))
-        ordered_words = []
-        for ln in lines:
-            ln.column_index = 0
+    if any(w.line_num > 0 for w in words) and not _blocks_mix_columns(lines):
+        # Tesseract's block order follows the page's articles (headline, its columns, the
+        # next article, captions) far better than one page-wide column grid on busy
+        # newspaper pages. It is only trusted when no block mixes lines of different
+        # columns; otherwise Tesseract cut across the columns and the grid order is used.
+        groups = _order_by_tesseract_blocks(lines)
+    elif num_cols <= 1:
+        groups = [sorted(lines, key=lambda ln: (ln.top, ln.left))]
+    else:
+        groups = [_order_lines_by_columns(lines, columns)]
+
+    ordered_lines: list[ReconstructedLine] = []
+    ordered_words: list[WordBox] = []
+    text_blocks: list[str] = []
+    for group in groups:
+        prev_col: int | None = None
+        prev_spanning = False
+        if text_blocks:
+            text_blocks.append("")  # blank line between Tesseract blocks
+        for ln in group:
+            if prev_col is not None and (ln.column_index != prev_col or ln.is_spanning != prev_spanning):
+                text_blocks.append("")  # blank line separating columns or headline blocks
+            text_blocks.append(ln.text)
+            prev_col = ln.column_index
+            prev_spanning = ln.is_spanning
+            ordered_lines.append(ln)
             for w in ln.words:
-                w.column_index = 0
+                w.column_index = ln.column_index
                 w.reading_order_index = len(ordered_words)
                 ordered_words.append(w)
-        return LayoutAnalysisResult(
-            ordered_words=ordered_words,
-            ordered_lines=lines,
-            logical_text="\n".join(ln.text for ln in lines if ln.text),
-            column_count=1,
-        )
 
-    # Identify spanning headlines vs. column-bound lines
+    return LayoutAnalysisResult(
+        ordered_words=ordered_words,
+        ordered_lines=ordered_lines,
+        logical_text="\n".join(text_blocks).strip(),
+        column_count=num_cols,
+    )
+
+
+def _assign_columns(lines: list[ReconstructedLine], columns: list[tuple[float, float]]) -> None:
+    """Set column_index / is_spanning of every line against the page's column grid."""
+    num_cols = len(columns)
     for ln in lines:
+        if num_cols <= 1:
+            ln.column_index = 0
+            ln.is_spanning = False
+            continue
         overlapped_cols: list[int] = []
         for col_idx, (col_l, col_r) in enumerate(columns):
             overlap = min(ln.right, col_r) - max(ln.left, col_l)
@@ -246,21 +299,23 @@ def analyze_layout_and_reading_order(
             ln.column_index = overlapped_cols[0]
         else:
             # Assign to nearest column center
-            best_col = min(
+            ln.is_spanning = False
+            ln.column_index = min(
                 range(num_cols),
                 key=lambda ci: abs(ln.center_x - ((columns[ci][0] + columns[ci][1]) / 2.0)),
             )
-            ln.is_spanning = False
-            ln.column_index = best_col
 
-    # Partition page vertically at full-width spanning headlines so headlines precede columns below
+
+def _order_lines_by_columns(
+    lines: list[ReconstructedLine], columns: list[tuple[float, float]]
+) -> list[ReconstructedLine]:
+    """Spanning headlines first, then each column top-to-bottom, band by band."""
+    num_cols = len(columns)
     lines_by_top = sorted(lines, key=lambda ln: (ln.top, ln.left))
     ordered_lines: list[ReconstructedLine] = []
     current_band: list[ReconstructedLine] = []
 
     def _flush_band(band: list[ReconstructedLine]) -> list[ReconstructedLine]:
-        if not band:
-            return []
         result: list[ReconstructedLine] = []
         for col_idx in range(num_cols):
             col_lines = [b for b in band if b.column_index == col_idx]
@@ -268,6 +323,7 @@ def analyze_layout_and_reading_order(
             result.extend(col_lines)
         return result
 
+    # Partition vertically at spanning headlines so headlines precede the columns below
     for ln in lines_by_top:
         if ln.is_spanning:
             ordered_lines.extend(_flush_band(current_band))
@@ -276,26 +332,23 @@ def analyze_layout_and_reading_order(
         else:
             current_band.append(ln)
     ordered_lines.extend(_flush_band(current_band))
+    return ordered_lines
 
-    ordered_words = []
-    text_blocks: list[str] = []
-    prev_col: int | None = None
-    prev_spanning: bool = False
 
-    for ln in ordered_lines:
-        if prev_col is not None and (ln.column_index != prev_col or ln.is_spanning != prev_spanning):
-            text_blocks.append("")  # Blank line separating columns or headline blocks
-        text_blocks.append(ln.text)
-        prev_col = ln.column_index
-        prev_spanning = ln.is_spanning
-        for w in ln.words:
-            w.column_index = ln.column_index
-            w.reading_order_index = len(ordered_words)
-            ordered_words.append(w)
+def _blocks_mix_columns(lines: list[ReconstructedLine]) -> bool:
+    """True when a Tesseract block holds non-spanning lines of more than one column."""
+    cols_by_block: dict[int, set[int]] = {}
+    for ln in lines:
+        if not ln.is_spanning:
+            cols_by_block.setdefault(ln.words[0].block_num, set()).add(ln.column_index)
+    return any(len(cols) > 1 for cols in cols_by_block.values())
 
-    return LayoutAnalysisResult(
-        ordered_words=ordered_words,
-        ordered_lines=ordered_lines,
-        logical_text="\n".join(text_blocks).strip(),
-        column_count=num_cols,
-    )
+
+def _order_by_tesseract_blocks(lines: list[ReconstructedLine]) -> list[list[ReconstructedLine]]:
+    blocks: dict[int, list[ReconstructedLine]] = {}
+    for ln in lines:
+        blocks.setdefault(ln.words[0].block_num, []).append(ln)
+    return [
+        sorted(blocks[b], key=lambda ln: (ln.words[0].par_num, ln.words[0].line_num, ln.left))
+        for b in sorted(blocks)
+    ]

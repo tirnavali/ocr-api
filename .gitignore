@@ -13,6 +13,8 @@ build/
 
 # Runtime data, SQLite DB & job artifacts
 data/
+# NER model files (hundreds of MB; mounted into the containers, see README 2.4)
+models/
 *.sqlite3
 *.sqlite3-shm
 *.sqlite3-wal

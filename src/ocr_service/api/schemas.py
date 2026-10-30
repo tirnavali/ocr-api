@@ -7,7 +7,118 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ocr_service.domain.models import DpiSource, JobStatus, PdfAProfile
+from ocr_service.domain.models import (
+    CallbackStatus,
+    DpiSource,
+    JobStatus,
+    JobType,
+    LayoutMode,
+    NlpMode,
+    PdfAProfile,
+)
+
+
+class CdnSourceSchema(BaseModel):
+    path: str = Field(
+        ...,
+        min_length=1,
+        max_length=1024,
+        description="CDN-relative file path, e.g. 'AOS\\\\ab\\\\cd\\\\belge.pdf'.",
+    )
+    filename: str | None = Field(
+        default=None,
+        max_length=255,
+        description="Original file name; defaults to the last path segment.",
+    )
+
+
+class CdnOcrJobRequest(BaseModel):
+    """OCR job whose inputs the worker downloads from the internal CDN (no upload)."""
+
+    sources: list[CdnSourceSchema] = Field(
+        ..., min_length=1, max_length=500, description="1 PDF or 1..N images on the CDN."
+    )
+    language: str | None = None
+    force_ocr: bool | None = None
+    working_dpi: int | None = Field(default=None, ge=100, le=600)
+    preserve_source_images: bool | None = None
+    deskew_working_image: bool | None = None
+    remove_color_marks: bool = False
+    layout_mode: LayoutMode = LayoutMode.AUTO
+    pdfa_profile: PdfAProfile | None = None
+    enable_nlp: bool = False
+    nlp_mode: NlpMode = NlpMode.OFF
+    custom_topics: list[str] = Field(default_factory=list)
+    callback_url: str | None = Field(
+        default=None,
+        max_length=512,
+        description="Receives a signed POST when the job reaches a terminal state.",
+    )
+
+
+class PackageEntrySchema(BaseModel):
+    path: str = Field(..., min_length=1, max_length=1024, description="CDN-relative file path.")
+    name: str = Field(
+        ...,
+        min_length=1,
+        max_length=1024,
+        description="Path inside the zip, folders allowed (e.g. 'Fon/K00001_belge.pdf').",
+    )
+    ref: str = Field(
+        default="",
+        max_length=128,
+        description="Caller's own identifier, echoed in the MANIFEST and the skipped-file list.",
+    )
+
+
+class PackageJobRequest(BaseModel):
+    """Zip package built from CDN files, split into parts of at most ``max_part_mb``."""
+
+    entries: list[PackageEntrySchema] = Field(..., min_length=1)
+    max_part_mb: int = Field(default=250, ge=1, description="Part size limit before a new zip starts.")
+    part_name_prefix: str | None = Field(
+        default=None, max_length=120, description="Parts are named '<prefix>_paket-NN.zip'."
+    )
+    manifest_title: str | None = Field(
+        default=None, max_length=300, description="First comment line of every part's MANIFEST.txt."
+    )
+    callback_url: str | None = Field(
+        default=None,
+        max_length=512,
+        description="Receives a signed POST (including the part list) when the job ends.",
+    )
+
+
+class PackagePartSchema(BaseModel):
+    part_no: int
+    filename: str
+    size_bytes: int
+    file_count: int
+    download_url: str
+
+
+class PackageSkippedFileSchema(BaseModel):
+    ref: str
+    name: str
+    path: str
+    error_code: str
+    message: str = ""
+
+
+class PackageResultSchema(BaseModel):
+    entry_count: int
+    ok_count: int
+    error_count: int
+    total_bytes: int
+    parts: list[PackagePartSchema]
+    errors: list[PackageSkippedFileSchema]
+    errors_truncated: bool = False
+
+
+class JobDeleteResponse(BaseModel):
+    job_id: str
+    status: JobStatus
+    message: str
 
 
 class ErrorDetailSchema(BaseModel):
@@ -41,7 +152,11 @@ class JobSubmitResponse(BaseModel):
 
 class JobStatusResponse(BaseModel):
     job_id: str
+    job_type: JobType = JobType.OCR
     status: JobStatus
+    callback_status: CallbackStatus = CallbackStatus.NONE
+    callback_attempts: int = 0
+    callback_last_error: str | None = None
     page_count: int = 0
     completed_pages: int = 0
     progress_percent: float = 0.0
@@ -62,6 +177,7 @@ class JobStatusResponse(BaseModel):
     result_url: str | None = None
     pages_url: str | None = None
     metadata_url: str
+    package: PackageResultSchema | None = None
 
 
 class BBoxPxSchema(BaseModel):

@@ -20,6 +20,61 @@ class JobStatus(StrEnum):
     EXPIRED = "expired"
 
 
+TERMINAL_STATUSES: frozenset[JobStatus] = frozenset(
+    {JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED}
+)
+
+
+class JobType(StrEnum):
+    """Kind of work a job performs; each type is claimed by its own worker pool."""
+
+    OCR = "ocr"
+    PACKAGE = "package"
+
+
+class CallbackStatus(StrEnum):
+    """Delivery state of the signed completion callback for a job."""
+
+    NONE = "none"  # no callback_url configured
+    WAITING = "waiting"  # job not terminal yet
+    PENDING = "pending"  # terminal; delivery due at callback_next_at
+    DELIVERED = "delivered"
+    FAILED = "failed"  # gave up after CALLBACK_MAX_ATTEMPTS
+
+
+@dataclass(frozen=True, slots=True)
+class CdnSourceRef:
+    """Job input referenced by its internal CDN path; the worker downloads it itself."""
+
+    path: str
+    filename: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"path": self.path, "filename": self.filename}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CdnSourceRef:
+        return cls(path=str(data["path"]), filename=str(data["filename"]))
+
+
+@dataclass(frozen=True, slots=True)
+class PackageEntry:
+    """One file of a package job: where to fetch it, its name inside the zip, caller's ref."""
+
+    path: str
+    name: str
+    ref: str = ""
+
+    def to_dict(self) -> dict[str, str]:
+        return {"path": self.path, "name": self.name, "ref": self.ref}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> PackageEntry:
+        return cls(
+            path=str(data["path"]), name=str(data["name"]), ref=str(data.get("ref") or "")
+        )
+
+
 VALID_STATE_TRANSITIONS: dict[JobStatus, set[JobStatus]] = {
     JobStatus.QUEUED: {
         JobStatus.PROCESSING,
@@ -306,6 +361,8 @@ class JobSubmissionOptions:
     working_dpi: int = 300
     preserve_source_images: bool = True
     deskew_working_image: bool = True
+    # Opt-in: whitens light red/yellow marks (archive stamps, viewer highlights) before OCR.
+    remove_color_marks: bool = False
     layout_mode: LayoutMode = LayoutMode.AUTO
     pdfa_profile: PdfAProfile = PdfAProfile.PDFA_2B
     enable_nlp: bool = True
@@ -319,6 +376,7 @@ class JobSubmissionOptions:
             "working_dpi": self.working_dpi,
             "preserve_source_images": self.preserve_source_images,
             "deskew_working_image": self.deskew_working_image,
+            "remove_color_marks": self.remove_color_marks,
             "layout_mode": self.layout_mode.value,
             "pdfa_profile": self.pdfa_profile.value,
             "enable_nlp": self.enable_nlp,
@@ -338,6 +396,7 @@ class JobSubmissionOptions:
             working_dpi=int(data.get("working_dpi", 300)),
             preserve_source_images=bool(data.get("preserve_source_images", True)),
             deskew_working_image=bool(data.get("deskew_working_image", True)),
+            remove_color_marks=bool(data.get("remove_color_marks", False)),
             layout_mode=LayoutMode(data.get("layout_mode", LayoutMode.AUTO.value)),
             pdfa_profile=PdfAProfile(data.get("pdfa_profile", PdfAProfile.PDFA_2B.value)),
             enable_nlp=enable_nlp,
@@ -470,3 +529,9 @@ class JobEntity:
     expires_at: datetime | None = None
     updated_at: datetime | None = None
     metadata_json: dict[str, Any] = field(default_factory=dict)
+    job_type: JobType = JobType.OCR
+    source_refs: list[CdnSourceRef] = field(default_factory=list)
+    callback_url: str | None = None
+    callback_status: CallbackStatus = CallbackStatus.NONE
+    callback_attempts: int = 0
+    callback_last_error: str | None = None

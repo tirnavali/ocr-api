@@ -23,6 +23,9 @@ class JobRecord(Base):
     __tablename__ = "ocr_jobs"
 
     job_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="ocr", server_default="ocr"
+    )
     status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     options_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     input_filenames_json: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
@@ -30,6 +33,23 @@ class JobRecord(Base):
     content_sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     correlation_id: Mapped[str] = mapped_column(String(64), nullable=False, default="-")
+    # CDN-referenced inputs: [{"path": ..., "filename": ...}]; empty for uploaded inputs
+    source_refs_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, nullable=False, default=list, server_default="[]"
+    )
+
+    # Signed completion callback (durable outbox: delivered by worker maintenance loop)
+    callback_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    callback_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="none", server_default="none"
+    )
+    callback_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    callback_next_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    callback_last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     page_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     completed_pages: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -74,6 +94,8 @@ class JobRecord(Base):
     __table_args__ = (
         Index("ix_ocr_jobs_queue_claim", "status", "next_retry_at", "created_at"),
         Index("ix_ocr_jobs_lease", "status", "lease_expires_at"),
+        Index("ix_ocr_jobs_type_claim", "job_type", "status", "next_retry_at", "created_at"),
+        Index("ix_ocr_jobs_callback_due", "callback_status", "callback_next_at"),
     )
 
 

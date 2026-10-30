@@ -72,3 +72,68 @@ def test_two_column_newspaper_with_spanning_headline_reading_order() -> None:
         if w.text == "Sağ_Satır1_Kelime1":
             assert w.bbox_source_px.left == 1150.0
             assert w.bbox_source_px.top == 350.0
+
+
+def _tess_word(
+    text: str, left: float, top: float, block: int, line: int, width: float = 60.0, height: float = 14.0
+) -> WordBox:
+    box = BBoxPx(left=left, top=top, width=width, height=height)
+    return WordBox(
+        text=text,
+        confidence=90.0,
+        bbox_working_px=box,
+        bbox_source_px=box,
+        block_num=block,
+        par_num=1,
+        line_num=line,
+    )
+
+
+def _magazine_page_words() -> list[WordBox]:
+    """800 px wide magazine scan: kicker crossing the gutter, banner, two columns 20 px apart."""
+    words = [
+        # Kicker split by Tesseract into two blocks; the second crosses the gutter (x 373..578).
+        _tess_word("Türkiye", 43, 18, block=2, line=1, width=150),
+        _tess_word("Birliği", 213, 18, block=2, line=1, width=150),
+        _tess_word("Başkanı", 373, 18, block=3, line=1, width=100),
+        _tess_word("Doğan:", 478, 18, block=3, line=1, width=100),
+        # Banner across both columns.
+        _tess_word("RESMİ", 81, 72, block=4, line=1, width=300, height=40),
+        _tess_word("TARİH", 400, 72, block=4, line=1, width=319, height=40),
+    ]
+    # Column bodies: left x 40..390, right x 411..766; same baselines on both sides.
+    for i in range(12):
+        top = 300 + i * 20
+        words.append(_tess_word(f"Sol{i:02d}a", 40, top, block=7, line=i + 1, width=170))
+        words.append(_tess_word(f"Sol{i:02d}b", 215, top, block=7, line=i + 1, width=175))
+        words.append(_tess_word(f"Sag{i:02d}a", 411, top, block=10, line=i + 1, width=170))
+        words.append(_tess_word(f"Sag{i:02d}b", 586, top, block=10, line=i + 1, width=180))
+    return words
+
+
+def test_narrow_gutter_columns_are_not_merged_when_tesseract_lines_are_known() -> None:
+    """A 20 px gutter is far below the gap-split threshold; Tesseract's lines must keep columns apart."""
+    res = analyze_layout_and_reading_order(
+        _magazine_page_words(), page_width_px=795, page_height_px=744, layout_mode=LayoutMode.AUTO
+    )
+
+    assert res.column_count == 2
+    lines = res.logical_text.splitlines()
+    body = [ln for ln in lines if ln.startswith(("Sol", "Sag"))]
+    assert body == [f"Sol{i:02d}a Sol{i:02d}b" for i in range(12)] + [
+        f"Sag{i:02d}a Sag{i:02d}b" for i in range(12)
+    ]
+    # Kicker and banner come before the columns.
+    assert lines.index("Türkiye Birliği") < lines.index("RESMİ TARİH") < lines.index(body[0])
+
+
+def test_words_without_tesseract_structure_still_group_by_position() -> None:
+    """Restored/synthetic words (line_num == 0) keep the geometric fallback."""
+    words = [
+        _make_word("Sol", 200, 350, width=250),
+        _make_word("Satır", 480, 350, width=250),
+    ]
+    res = analyze_layout_and_reading_order(
+        words, page_width_px=2000, page_height_px=2800, layout_mode=LayoutMode.AUTO
+    )
+    assert res.logical_text == "Sol Satır"
