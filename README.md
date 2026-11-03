@@ -75,6 +75,22 @@ room; every part ends with a `MANIFEST.txt` (`Durum;Ref;PaketIciAd;Boyut;HataKod
 - `GET /api/v1/jobs/{job_id}` and the callback both carry `package`: counts, the part list and the
   first 200 skipped files.
 
+**Staged inputs (no CDN access needed).** When only the caller may read the source files (the KAHB
+internal CDN's private folder is reachable from the KAHB API alone), the caller uploads the files and
+the package job reads them from a staging area instead of the CDN:
+
+1. `POST /api/v1/package-staging/{staging_id}/files` (multipart: `ref` + `file`) once per file.
+   Uploading the same `ref` again overwrites it, so a retried export can resume. `staging_id` and
+   `ref` allow `[A-Za-z0-9_-]` only; `MAX_PACKAGE_FILE_MB` applies to each file.
+2. `POST /api/v1/jobs/package` with `"staging_id"` and `entries[]` carrying `name` + `ref` (no
+   `path`). Every `ref` must have been uploaded (`400 STAGED_FILE_MISSING`, the area is kept for a
+   retry); a repeated `ref` is rejected (`DUPLICATE_STAGED_REF`).
+3. The area moves into the job directory and is deleted when the job ends. While the zip parts are
+   being written, disk use is briefly twice the export size.
+
+`DELETE /api/v1/package-staging/{staging_id}` drops an abandoned area; the janitor removes areas
+older than `PACKAGE_STAGING_RETENTION_HOURS` (default 48). The disk quota counts staging areas too.
+
 ### 2.4 Turkish NER: rule engine and BERTurk (ONNX INT8)
 
 `nlp_mode=fast` runs the rule engine (dictionary + capitalisation patterns). `nlp_mode=onnx`
@@ -175,6 +191,50 @@ Based on our empirical benchmark measurements (`tests/benchmark/run_benchmark.py
   - `OCR_THREADS_PER_WORKER=1` (`OMP_THREAD_LIMIT=1` is automatically enforced in code so Tesseract/OpenCV never oversubscribe CPU cores)
   - `MAX_CONCURRENT_JOBS=10`
   - Leaves 4–6 cores and >48 GB RAM headroom for FastAPI streaming I/O, `pikepdf` PDF/A-2b assembly, OS page cache, and `veraPDF` validation.
+
+### 4.3 KAHB Job Server Profile (as of 2026-11-03)
+
+The KAHB API (damga) is the only client. It downloads every file from its internal CDN itself and
+uploads it here, because the CDN's private folder is reachable from the KAHB API alone. The service
+therefore never calls the CDN, and job completion is polled by the KAHB API (Hangfire), not pushed.
+
+**Enabled**
+
+| Feature | Setting |
+| :--- | :--- |
+| API key authentication | `AUTH_ENABLED=true`; requests without `X-API-Key` get `401` |
+| OCR | 10 worker processes × 1 thread, 300 DPI working copy, 30 min per job / 3 min per page, 2 retries |
+| Languages | Server default `tur`; the KAHB API sends `tur+eng` with every job (`eng`, `tur`, `osd` installed) |
+| Deskew | `DESKEW_WORKING_IMAGE=true` |
+| Multi-column layout & small-print upscaling | Always on (no switch) |
+| Output | PDF/A-2b, source images preserved (`PRESERVE_SOURCE_IMAGES=true`) |
+| Packaging | Separate `package-worker`, one job at a time; 250 MB parts (chosen by the KAHB API); max 2 GB per file; 6 h job timeout |
+| Staging areas | Files uploaded by the KAHB API (section 2.3); abandoned areas purged after 48 h |
+| Retention | OCR results 24 h, failed jobs 12 h, zip packages 7 days (`PACKAGE_RETENTION_HOURS=168`), job metadata 30 days |
+| Limits | `MAX_DISK_USAGE_GB=300`, queue depth 500, 500 MB per upload |
+| Health checks | API: `/api/v1/health/live`; workers: `ocr-worker-health` (recent heartbeat from this container) |
+
+**Disabled / unused**
+
+| Feature | Why |
+| :--- | :--- |
+| NLP (`enable_nlp`) | The KAHB API sends `enable_nlp=false`, `nlp_mode=off` (the upload endpoint would default to `fast`) |
+| BERTurk NER (`nlp_mode=onnx`) | No model installed (`NER_MODEL_DIR` empty, `models/ner` empty) |
+| Forced OCR | Normal OCR sends no `force_ocr` (server default `false`): PDFs that already have a text layer are not re-OCRed; only the KAHB OCR comparison screen forces it |
+| Colour stamp/highlight removal | Per-request `remove_color_marks`, not sent |
+| Completion callbacks | `CALLBACK_HMAC_SECRET` / `CALLBACK_ALLOWED_PREFIXES` not set |
+| veraPDF validation | `REQUIRE_VERAPDF=false` |
+| CDN inputs (`from-cdn`, package `path`) | Not used since files are uploaded; leftover `CDN_*` values in `.env` can be removed |
+
+**Updating the server (there is no CI/CD)**
+
+```bash
+cd /opt/ocr-api
+git fetch origin && git checkout -B <branch> origin/<branch>
+docker compose build ocr-api        # build once: the three services share one image tag
+docker compose up -d --no-build     # building all three in parallel fails with "already exists"
+docker compose ps                   # all three should turn (healthy) within ~1 minute
+```
 
 ---
 
