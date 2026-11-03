@@ -88,6 +88,13 @@ services:
     security_opt:
       - no-new-privileges:true
     stop_grace_period: 60s
+    # Workers serve no port: the image HEALTHCHECK (curl :8000) would always fail here.
+    healthcheck:
+      test: ["CMD", "ocr-worker-health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
     restart: unless-stopped
     depends_on:
       ocr-api:
@@ -134,6 +141,13 @@ services:
     security_opt:
       - no-new-privileges:true
     stop_grace_period: 60s
+    # Workers serve no port: the image HEALTHCHECK (curl :8000) would always fail here.
+    healthcheck:
+      test: ["CMD", "ocr-worker-health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
     restart: unless-stopped
     depends_on:
       ocr-api:

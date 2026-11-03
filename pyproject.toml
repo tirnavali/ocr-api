@@ -49,6 +49,7 @@ dev = [
 [project.scripts]
 ocr-api = "ocr_service.main:run_api"
 ocr-worker = "ocr_service.worker_main:run_worker"
+ocr-worker-health = "ocr_service.worker_health:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ocr_service"]

@@ -909,6 +909,20 @@ class JobRepository:
                 if increment_processed:
                     rec.jobs_processed += 1
 
+    def count_live_workers_on_host(self, hostname: str, max_age_seconds: int) -> int:
+        """Workers on ``hostname`` whose heartbeat is newer than ``max_age_seconds``."""
+        cutoff = utcnow() - timedelta(seconds=max_age_seconds)
+        with self._db.session() as sess:
+            return int(
+                sess.execute(
+                    select(func.count(WorkerHeartbeatRecord.worker_id)).where(
+                        WorkerHeartbeatRecord.hostname == hostname,
+                        WorkerHeartbeatRecord.last_heartbeat_at >= cutoff,
+                    )
+                ).scalar_one()
+                or 0
+            )
+
     def get_queue_and_system_stats(self) -> dict[str, Any]:
         """Collect queue depth, status counts, average durations, and active worker count."""
         now = utcnow()
