@@ -319,3 +319,130 @@ def test_package_submission_rejects_unsafe_input(
 )
 def test_sanitize_archive_name(raw: str, expected: str) -> None:
     assert sanitize_archive_name(raw, fallback="fallback.bin") == expected
+
+
+@pytest.fixture()
+def staging_settings(tmp_path: Path) -> Settings:
+    # No CDN at all: the caller (KAHB API) may be the only one allowed to read it.
+    storage_dir = tmp_path / "ocr_data"
+    storage_dir.mkdir()
+    return Settings(
+        APP_ENV="testing",
+        LOG_JSON=False,
+        LOG_LEVEL="WARNING",
+        TEMP_STORAGE_PATH=storage_dir,
+        WORKER_JOB_TYPES="package",
+        MAX_PACKAGE_ENTRIES=10,
+    )
+
+
+def _stage(client: TestClient, staging_id: str, ref: str, content: bytes):
+    return client.post(
+        f"/api/v1/package-staging/{staging_id}/files",
+        data={"ref": ref},
+        files={"file": ("dosya.pdf", content, "application/octet-stream")},
+    )
+
+
+def test_staged_package_is_built_from_uploaded_files(staging_settings: Settings) -> None:
+    app = create_app(staging_settings)
+    staging_id = "talep0123456789abcdef"
+    a, b = _blob(700_000, 1), _blob(400_000, 2)
+
+    with TestClient(app) as client:
+        worker = OcrWorker(staging_settings, app.state.repo, app.state.storage, worker_id="pkg-s1")
+        assert _stage(client, staging_id, "ek-1", b"eski icerik").status_code == 201
+        # Uploading a ref again replaces it, so the caller's upload loop can be re-run.
+        resp = _stage(client, staging_id, "ek-1", a)
+        assert resp.status_code == 201, resp.text
+        assert resp.json() == {"staging_id": staging_id, "ref": "ek-1", "size_bytes": 700_000}
+        assert _stage(client, staging_id, "ek-2", b).status_code == 201
+
+        resp = client.post(
+            "/api/v1/jobs/package",
+            json={
+                "staging_id": staging_id,
+                "entries": [
+                    {"ref": "ek-1", "name": "Fon/a.pdf"},
+                    {"ref": "ek-2", "name": "Fon/b.pdf"},
+                ],
+                "max_part_mb": 1,
+                "part_name_prefix": "disa-aktarma_s",
+            },
+            headers={"Idempotency-Key": "talep-s"},
+        )
+        assert resp.status_code == 202, resp.text
+        job_id = resp.json()["job_id"]
+        # The area now belongs to the job; it is not left behind for the janitor.
+        assert not app.state.storage.get_staging_path(staging_id).exists()
+
+        done = worker.process_next_available_job()
+        assert done is not None and done.status.value == "completed", done and done.error_message
+
+        pkg = client.get(f"/api/v1/jobs/{job_id}").json()["package"]
+        assert (pkg["ok_count"], pkg["error_count"]) == (2, 0)
+        with zipfile.ZipFile(io.BytesIO(client.get(pkg["parts"][0]["download_url"]).content)) as zf:
+            assert zf.read("Fon/a.pdf") == a
+            assert zf.read("Fon/b.pdf") == b
+            assert "OK;ek-2;Fon/b.pdf;400000" in zf.read("MANIFEST.txt").decode("utf-8")
+
+        staged_input = app.state.storage.get_job_paths(job_id).input_dir / packager.STAGED_INPUT_DIRNAME
+        assert not staged_input.exists()
+
+
+def test_staged_package_rejects_missing_upload_and_keeps_the_area(staging_settings: Settings) -> None:
+    app = create_app(staging_settings)
+    staging_id = "talepmissing0001"
+
+    with TestClient(app) as client:
+        assert _stage(client, staging_id, "ek-1", b"%PDF-1.4 a").status_code == 201
+        resp = client.post(
+            "/api/v1/jobs/package",
+            json={
+                "staging_id": staging_id,
+                "entries": [{"ref": "ek-1", "name": "a.pdf"}, {"ref": "ek-2", "name": "b.pdf"}],
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        assert resp.json()["error"]["code"] == "STAGED_FILE_MISSING"
+        assert app.state.storage.get_staging_path(staging_id).exists()
+
+        assert client.delete(f"/api/v1/package-staging/{staging_id}").status_code == 204
+        assert not app.state.storage.get_staging_path(staging_id).exists()
+
+
+@pytest.mark.parametrize(
+    ("staging_id", "ref", "code"),
+    [
+        ("talep-gecerli-01", "../etc", "INVALID_STAGED_REF"),
+        ("..", "ek-1", "INVALID_STAGED_REF"),
+        ("kisa", "ek-1", "INVALID_STAGING_ID"),
+    ],
+)
+def test_staged_upload_rejects_unsafe_names(
+    staging_settings: Settings, staging_id: str, ref: str, code: str
+) -> None:
+    with TestClient(create_app(staging_settings)) as client:
+        resp = _stage(client, staging_id, ref, b"x")
+    assert resp.status_code in (400, 404), resp.text
+    if resp.status_code == 400:
+        assert resp.json()["error"]["code"] == code
+
+
+def test_janitor_purges_abandoned_staging_areas(staging_settings: Settings) -> None:
+    from ocr_service.worker_main import RetentionAndRecoveryJanitor
+
+    app = create_app(staging_settings)
+    with TestClient(app) as client:
+        assert _stage(client, "eski-alan-0001", "ek-1", b"x").status_code == 201
+        assert _stage(client, "yeni-alan-0001", "ek-1", b"x").status_code == 201
+    storage = app.state.storage
+    old = storage.get_staging_path("eski-alan-0001")
+    stamp = (datetime.now(UTC) - timedelta(hours=49)).timestamp()
+    os.utime(old, (stamp, stamp))
+
+    summary = RetentionAndRecoveryJanitor(staging_settings, app.state.repo, storage).run_maintenance_cycle()
+
+    assert summary["expired_staging"] == 1
+    assert not old.exists()
+    assert storage.get_staging_path("yeni-alan-0001").exists()

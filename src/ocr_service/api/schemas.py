@@ -57,7 +57,11 @@ class CdnOcrJobRequest(BaseModel):
 
 
 class PackageEntrySchema(BaseModel):
-    path: str = Field(..., min_length=1, max_length=1024, description="CDN-relative file path.")
+    path: str = Field(
+        default="",
+        max_length=1024,
+        description="CDN-relative file path. Left empty when the job reads a staging area.",
+    )
     name: str = Field(
         ...,
         min_length=1,
@@ -72,9 +76,18 @@ class PackageEntrySchema(BaseModel):
 
 
 class PackageJobRequest(BaseModel):
-    """Zip package built from CDN files, split into parts of at most ``max_part_mb``."""
+    """Zip package split into parts of at most ``max_part_mb``.
+
+    Files come either from the internal CDN (``entries[].path``) or, when ``staging_id`` is
+    set, from a staging area the caller filled beforehand (one upload per ``entries[].ref``).
+    """
 
     entries: list[PackageEntrySchema] = Field(..., min_length=1)
+    staging_id: str | None = Field(
+        default=None,
+        max_length=64,
+        description="Staging area holding the files (see POST /package-staging/{staging_id}/files).",
+    )
     max_part_mb: int = Field(default=250, ge=1, description="Part size limit before a new zip starts.")
     part_name_prefix: str | None = Field(
         default=None, max_length=120, description="Parts are named '<prefix>_paket-NN.zip'."
@@ -95,6 +108,12 @@ class PackagePartSchema(BaseModel):
     size_bytes: int
     file_count: int
     download_url: str
+
+
+class StagedFileResponse(BaseModel):
+    staging_id: str
+    ref: str
+    size_bytes: int
 
 
 class PackageSkippedFileSchema(BaseModel):

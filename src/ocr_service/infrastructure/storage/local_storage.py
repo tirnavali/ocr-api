@@ -6,6 +6,7 @@ import hashlib
 import logging
 import re
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]")
 SAFE_JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+SAFE_REF_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 CHUNK_SIZE = 64 * 1024  # 64 KiB streaming chunks
 
 
@@ -59,10 +61,16 @@ class LocalJobStorage:
         self._base_dir = settings.temp_storage_path.resolve()
         self._jobs_dir = (self._base_dir / "jobs").resolve()
         self._jobs_dir.mkdir(parents=True, exist_ok=True)
+        self._staging_dir = (self._base_dir / "package-staging").resolve()
+        self._staging_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def base_dir(self) -> Path:
         return self._base_dir
+
+    @property
+    def staging_dir(self) -> Path:
+        return self._staging_dir
 
     @property
     def jobs_dir(self) -> Path:
@@ -103,7 +111,9 @@ class LocalJobStorage:
         """Verify free disk space and configured storage directory quota (FR-09, FR-16)."""
         usage = shutil.disk_usage(self._base_dir)
         free_mb = usage.free / (1024 * 1024)
-        used_storage_bytes = self.compute_directory_size(self._jobs_dir)
+        used_storage_bytes = self.compute_directory_size(self._jobs_dir) + self.compute_directory_size(
+            self._staging_dir
+        )
         max_quota_bytes = int(self._settings.max_disk_usage_gb * 1024 * 1024 * 1024)
 
         if free_mb < self._settings.min_free_disk_mb:
@@ -178,6 +188,74 @@ class LocalJobStorage:
         paths = self.get_job_paths(job_id, create=False)
         if paths.work_dir.exists():
             shutil.rmtree(paths.work_dir, ignore_errors=True)
+
+    def get_staging_path(self, staging_id: str) -> Path:
+        """Directory of one package staging area (files uploaded ahead of a package job)."""
+        if not SAFE_JOB_ID_RE.match(staging_id or ""):
+            raise ValidationError(
+                f"Invalid staging identifier format: {staging_id!r}", code="INVALID_STAGING_ID"
+            )
+        return self._staging_dir / staging_id
+
+    def staged_file_path(self, directory: Path, ref: str) -> Path:
+        """File of one staged entry inside a staging area or a job's staged input folder."""
+        if not SAFE_REF_RE.match(ref or ""):
+            raise ValidationError(
+                f"Staged file ref must match {SAFE_REF_RE.pattern}: {ref!r}", code="INVALID_STAGED_REF"
+            )
+        return directory / f"{ref}.bin"
+
+    def save_staged_file(self, staging_id: str, ref: str, file_obj: BinaryIO) -> int:
+        """Store one file in a staging area under its ref; uploading the same ref again replaces it.
+
+        Replacing (instead of rejecting) keeps the caller's upload loop safe to re-run after a
+        crash. The file is written next to its final name first, so a broken upload never
+        leaves a half file under the ref.
+        """
+        self.check_storage_capacity()
+        directory = self.get_staging_path(staging_id)
+        dest = self.staged_file_path(directory, ref)
+        directory.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(".part")
+        max_bytes = self._settings.max_package_file_mb * 1024 * 1024
+        size = 0
+        try:
+            file_obj.seek(0)
+            with open(tmp, "wb") as out_f:
+                while chunk := file_obj.read(CHUNK_SIZE):
+                    size += len(chunk)
+                    if size > max_bytes:
+                        raise PayloadTooLargeError(
+                            f"Staged file exceeds limit of {self._settings.max_package_file_mb} MB.",
+                            details={"max_package_file_mb": self._settings.max_package_file_mb},
+                        )
+                    out_f.write(chunk)
+            if size == 0:
+                raise ValidationError(f"Staged file {ref!r} is empty (0 bytes).", code="EMPTY_FILE")
+            tmp.replace(dest)
+        finally:
+            tmp.unlink(missing_ok=True)
+        return size
+
+    def purge_staging(self, staging_id: str) -> bool:
+        directory = self.get_staging_path(staging_id)
+        if directory.exists():
+            shutil.rmtree(directory, ignore_errors=True)
+            return True
+        return False
+
+    def purge_expired_staging(self, max_age_hours: float) -> int:
+        """Remove staging areas untouched for ``max_age_hours`` (their package job never came)."""
+        cutoff = time.time() - max_age_hours * 3600
+        purged = 0
+        for directory in self._staging_dir.iterdir():
+            try:
+                if directory.is_dir() and directory.stat().st_mtime < cutoff:
+                    shutil.rmtree(directory, ignore_errors=True)
+                    purged += 1
+            except OSError:
+                continue
+        return purged
 
     def purge_job_artifacts(self, job_id: str) -> bool:
         """Completely remove a job's directory (input, work, output) upon expiration or cancellation."""

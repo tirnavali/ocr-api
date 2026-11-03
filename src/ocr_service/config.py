@@ -128,6 +128,11 @@ class Settings(BaseSettings):
     max_package_part_mb: int = Field(
         default=4096, ge=1, le=65536, alias="MAX_PACKAGE_PART_MB"
     )
+    # Files uploaded into a staging area ahead of a package job; an area the caller never
+    # turned into a job (it crashed mid-upload) is purged after this many hours.
+    package_staging_retention_hours: float = Field(
+        default=48.0, gt=0.0, le=8760.0, alias="PACKAGE_STAGING_RETENTION_HOURS"
+    )
 
     # Internal CDN Source Fetching (job inputs referenced by CDN path instead of upload)
     cdn_base_url: str | None = Field(default=None, alias="CDN_BASE_URL")

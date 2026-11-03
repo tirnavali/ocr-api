@@ -1,8 +1,10 @@
-"""Package jobs: stream CDN files one by one into size-limited zip parts with a MANIFEST.
+"""Package jobs: stream files one by one into size-limited zip parts with a MANIFEST.
 
-Disk use stays bounded by the zip parts themselves plus one file in flight: each file is
-downloaded, stored into the open part (no compression; archive PDFs/TIFFs do not shrink)
-and deleted before the next one is fetched. A file that cannot be fetched is skipped and
+Files come from the internal CDN or from a staging area the caller uploaded them to. For
+CDN jobs disk use stays bounded by the zip parts themselves plus one file in flight: each
+file is downloaded, stored into the open part (no compression; archive PDFs/TIFFs do not
+shrink) and deleted before the next one is fetched. Staged files are kept until the job
+completes (a retry needs them), so a staged job briefly holds its files twice. A file that cannot be fetched is skipped and
 reported instead of failing the whole package, since one missing scan should not cost the
 user thousands of good ones.
 """
@@ -35,6 +37,9 @@ from ocr_service.logging_config import correlation_id_ctx, job_id_ctx
 logger = logging.getLogger(__name__)
 
 PACKAGE_ENTRIES_FILENAME = "package_entries.jsonl"
+# Files of a staged package job (moved here from the staging area at submission). They stay
+# until the job completes, so a retry after a crash still has every file.
+STAGED_INPUT_DIRNAME = "staged"
 PART_FILENAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,200}\.zip$")
 MAX_REPORTED_ERRORS = 200
 # Consecutive network-level failures (no HTTP answer at all) mean the CDN is down rather
@@ -174,6 +179,7 @@ class PackageJobHandler:
         max_part_bytes = int(options.get("max_part_mb") or 250) * 1024 * 1024
         prefix = sanitize_part_prefix(options.get("part_name_prefix"))
         manifest_title = str(options.get("manifest_title") or "")[:300]
+        staged_dir = paths.input_dir / STAGED_INPUT_DIRNAME if options.get("staging_id") else None
         max_file_bytes = self._settings.max_package_file_mb * 1024 * 1024
         timeout = self._settings.job_timeout_for(job.job_type.value)
 
@@ -233,10 +239,20 @@ class PackageJobHandler:
                 arcname = self._unique_name(
                     used_names, sanitize_archive_name(entry.name, fallback=f"dosya_{index + 1:06d}")
                 )
-                tmp_file = paths.work_dir / f"{index:06d}.bin"
+                if staged_dir is not None:
+                    source_file = self._storage.staged_file_path(staged_dir, entry.ref)
+                    if not source_file.is_file():
+                        record_error(entry, arcname, "STAGED_FILE_MISSING", "Staged file not found.")
+                        continue
+                    size = source_file.stat().st_size
+                    is_temp = False
+                else:
+                    source_file = paths.work_dir / f"{index:06d}.bin"
+                    is_temp = True
                 try:
-                    size = self._fetch(entry.path, tmp_file, max_file_bytes, keep_alive)
-                    consecutive_network_failures = 0
+                    if is_temp:
+                        size = self._fetch(entry.path, source_file, max_file_bytes, keep_alive)
+                        consecutive_network_failures = 0
                 except CdnFetchError as exc:
                     if "status_code" not in (exc.details or {}):
                         consecutive_network_failures += 1
@@ -260,13 +276,14 @@ class PackageJobHandler:
                         current = self._open_part(paths.output_dir, prefix, len(parts) + 1)
                         current.manifest.extend(pending_manifest)
                         pending_manifest.clear()
-                    current.archive.write(tmp_file, arcname=arcname)
+                    current.archive.write(source_file, arcname=arcname)
                     current.file_count += 1
                     current.manifest.append(f"OK;{entry.ref};{arcname};{size}")
                     ok_count += 1
                     total_bytes += size
                 finally:
-                    tmp_file.unlink(missing_ok=True)
+                    if is_temp:
+                        source_file.unlink(missing_ok=True)
 
                 if (index + 1) % PROGRESS_SAVE_EVERY == 0:
                     self._repo.set_job_progress(job.job_id, total=len(entries), completed=index + 1)
@@ -291,13 +308,16 @@ class PackageJobHandler:
         self._repo.merge_job_metadata(job.job_id, {"package": result})
         self._repo.set_job_progress(job.job_id, total=len(entries), completed=len(entries))
         self._storage.cleanup_working_dir(job.job_id)
+        if staged_dir is not None:
+            # Every file is in a part now; the job is not retried after this point.
+            shutil.rmtree(staged_dir, ignore_errors=True)
 
         if ok_count == 0:
             logger.warning("Package job produced no files", extra={"error_count": error_count})
             return self._fail(
                 job.job_id,
                 "PACKAGE_EMPTY",
-                f"None of the {len(entries)} files could be fetched from the CDN.",
+                f"None of the {len(entries)} files could be read.",
                 False,
             )
 

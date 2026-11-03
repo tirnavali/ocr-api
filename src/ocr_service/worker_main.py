@@ -72,9 +72,16 @@ class RetentionAndRecoveryJanitor:
                 expired_count += 1
                 logger.info("Purged expired job artifacts", extra={"expired_job_id": job_id})
 
+        staging_count = self._storage.purge_expired_staging(
+            self._settings.package_staging_retention_hours
+        )
+        if staging_count:
+            logger.info("Purged abandoned package staging areas", extra={"count": staging_count})
+
         return {
             "recovered_jobs": len(recovered_ids),
             "expired_jobs": expired_count,
+            "expired_staging": staging_count,
         }
 
 

@@ -35,6 +35,7 @@ from ocr_service.api.schemas import (
     PageNlpAnalysisSchema,
     PageResultSchema,
     PageTelemetrySchema,
+    StagedFileResponse,
     WordBoxSchema,
 )
 from ocr_service.config import Settings
@@ -64,6 +65,7 @@ from ocr_service.logging_config import correlation_id_ctx
 from ocr_service.pipeline.inspector import detect_file_format_by_magic
 from ocr_service.pipeline.packager import (
     PACKAGE_ENTRIES_FILENAME,
+    STAGED_INPUT_DIRNAME,
     package_part_path,
     write_package_entries,
 )
@@ -383,7 +385,7 @@ def submit_cdn_ocr_job(
     "/jobs/package",
     response_model=JobSubmitResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    summary="Submit a zip package job built from internal CDN files",
+    summary="Submit a zip package job built from internal CDN files or a staging area",
 )
 def submit_package_job(
     request: PackageJobRequest,
@@ -398,9 +400,11 @@ def submit_package_job(
     """Enqueue a package job; a package-pool worker fetches the files and writes the parts.
 
     The entry list is kept in the job directory instead of the job table, so a request
-    with tens of thousands of files does not slow down every status query.
+    with tens of thousands of files does not slow down every status query. A staging area
+    is moved into the job directory as a whole, so the job owns its files from then on.
     """
-    if not (settings.cdn_base_url and settings.cdn_verification_id):
+    staging_dir = storage.get_staging_path(request.staging_id) if request.staging_id else None
+    if staging_dir is None and not (settings.cdn_base_url and settings.cdn_verification_id):
         raise ValidationError(
             "Package jobs are disabled: CDN_BASE_URL and CDN_VERIFICATION_ID are not configured.",
             code="CDN_NOT_CONFIGURED",
@@ -420,14 +424,24 @@ def submit_package_job(
 
     entries: list[PackageEntry] = []
     for e in request.entries:
-        normalize_cdn_path(e.path)
-        entries.append(PackageEntry(path=e.path.strip(), name=e.name, ref=e.ref))
+        if staging_dir is None:
+            normalize_cdn_path(e.path)
+            entries.append(PackageEntry(path=e.path.strip(), name=e.name, ref=e.ref))
+        else:
+            storage.staged_file_path(staging_dir, e.ref)  # validates the ref
+            entries.append(PackageEntry(path="", name=e.name, ref=e.ref))
+    if staging_dir is not None and len({e.ref for e in entries}) != len(entries):
+        raise ValidationError(
+            "Every entry of a staged package needs its own ref.", code="DUPLICATE_STAGED_REF"
+        )
 
     package_options = {
         "max_part_mb": request.max_part_mb,
         "part_name_prefix": request.part_name_prefix,
         "manifest_title": request.manifest_title,
     }
+    if staging_dir is not None:
+        package_options["staging_id"] = request.staging_id
     content_sha256 = hashlib.sha256(
         json.dumps(
             [package_options, [e.to_dict() for e in entries]], ensure_ascii=False
@@ -438,11 +452,24 @@ def submit_package_job(
         if existing is not None:
             return _build_submit_response(existing, idempotent_replay=True)
 
+    if staging_dir is not None:
+        missing = [e.ref for e in entries if not storage.staged_file_path(staging_dir, e.ref).is_file()]
+        if missing:
+            raise ValidationError(
+                f"{len(missing)} entries have no uploaded file in staging area "
+                f"{request.staging_id!r} (first: {missing[0]!r}).",
+                code="STAGED_FILE_MISSING",
+            )
+
     storage.check_storage_capacity()
     job_id = f"job-{uuid.uuid4().hex}"
     paths = storage.get_job_paths(job_id, create=True)
     entries_path = paths.input_dir / PACKAGE_ENTRIES_FILENAME
     write_package_entries(entries_path, entries)
+    staged_input_dir = paths.input_dir / STAGED_INPUT_DIRNAME
+    if staging_dir is not None:
+        # Same filesystem: a rename, however many files the area holds.
+        staging_dir.replace(staged_input_dir)
     try:
         job = repo.enqueue_job(
             job_id=job_id,
@@ -471,13 +498,48 @@ def submit_package_job(
             extra_metadata={"package_request": package_options},
         )
     except Exception:
+        if staging_dir is not None and staged_input_dir.exists():
+            # Give the uploads back so the caller can resubmit without uploading again.
+            staged_input_dir.replace(staging_dir)
         storage.purge_job_artifacts(job_id)
         raise
     logger.info(
         "Accepted new package job",
-        extra={"job_id": job.job_id, "entry_count": len(entries)},
+        extra={"job_id": job.job_id, "entry_count": len(entries), "staged": staging_dir is not None},
     )
     return _build_submit_response(job, idempotent_replay=False)
+
+
+@router.post(
+    "/package-staging/{staging_id}/files",
+    response_model=StagedFileResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Upload one file into a staging area for a later package job",
+)
+def upload_staged_file(
+    staging_id: str,
+    storage: Annotated[LocalJobStorage, Depends(get_job_storage)],
+    ref: Annotated[str, Form(description="Caller's identifier of the file; the package entry's ref.")],
+    file: Annotated[UploadFile, File(description="File content, stored as is.")],
+) -> StagedFileResponse:
+    """For callers that may not let this service read their file store (the CDN): the
+    caller pushes each file here, then submits ``POST /jobs/package`` with ``staging_id``.
+    Uploading the same ref again replaces the file, so a broken upload loop can be re-run.
+    """
+    size = storage.save_staged_file(staging_id, ref, file.file)
+    return StagedFileResponse(staging_id=staging_id, ref=ref, size_bytes=size)
+
+
+@router.delete(
+    "/package-staging/{staging_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Drop a staging area that will not become a package job",
+)
+def delete_staging_area(
+    staging_id: str,
+    storage: Annotated[LocalJobStorage, Depends(get_job_storage)],
+) -> None:
+    storage.purge_staging(staging_id)
 
 
 def _package_result_schema(job: JobEntity) -> PackageResultSchema | None:
