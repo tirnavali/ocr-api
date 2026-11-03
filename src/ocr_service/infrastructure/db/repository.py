@@ -903,6 +903,10 @@ class JobRepository:
                 )
                 sess.add(rec)
             else:
+                # worker_id embeds the PID, which repeats across container restarts:
+                # refresh the owner so per-container health checks see the new hostname.
+                rec.hostname = socket.gethostname()
+                rec.pid = os.getpid()
                 rec.status = status
                 rec.active_job_id = active_job_id
                 rec.last_heartbeat_at = now

@@ -33,3 +33,20 @@ def test_healthy_only_with_a_recent_heartbeat_on_this_host(test_settings: Settin
     _age_heartbeat(db, "worker-ocr-01-1", 120)
     assert check_worker_health(repo, host, 60) is False
     db.dispose()
+
+
+def test_restarted_container_reusing_a_worker_id_takes_over_the_heartbeat(
+    test_settings: Settings,
+) -> None:
+    # worker_id embeds the PID, and PIDs repeat after a container restart.
+    db = DatabaseSessionManager(test_settings)
+    repo = JobRepository(db)
+    repo.record_worker_heartbeat("worker-ocr-01-7")
+    with db.session() as sess:
+        sess.get(WorkerHeartbeatRecord, "worker-ocr-01-7").hostname = "old-container"
+
+    repo.record_worker_heartbeat("worker-ocr-01-7")
+
+    assert check_worker_health(repo, socket.gethostname(), 60) is True
+    assert check_worker_health(repo, "old-container", 60) is False
+    db.dispose()
