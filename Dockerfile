@@ -62,6 +62,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Debian's tesseract-ocr-tur is the small tessdata_fast model; replace it with tessdata_best
+# (larger LSTM network, Lfx192; same model the KAHB .NET OCR project ships).
+COPY resources/tessdata/tur.traineddata /usr/share/tesseract-ocr/5/tessdata/tur.traineddata
+
 # Create unprivileged service user (FR-17)
 RUN groupadd --gid 10001 ocrgroup && \
     useradd --uid 10001 --gid ocrgroup --shell /usr/sbin/nologin --create-home ocruser && \

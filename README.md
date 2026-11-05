@@ -204,7 +204,7 @@ therefore never calls the CDN, and job completion is polled by the KAHB API (Han
 | :--- | :--- |
 | API key authentication | `AUTH_ENABLED=true`; requests without `X-API-Key` get `401` |
 | OCR | 10 worker processes × 1 thread, 300 DPI working copy, 30 min per job / 3 min per page, 2 retries |
-| Languages | Server default `tur`; the KAHB API sends `tur+eng` with every job (`eng`, `tur`, `osd` installed) |
+| Languages | Server default `tur`; the KAHB API sends `tur+eng` with every job (`eng`, `tur`, `osd` installed). `tur` is the `tessdata_best` model from `resources/tessdata/` (replaces Debian's `tessdata_fast` file); `eng` and `osd` are Debian's |
 | Deskew | `DESKEW_WORKING_IMAGE=true` |
 | Multi-column layout & small-print upscaling | Always on (no switch) |
 | Output | PDF/A-2b, source images preserved (`PRESERVE_SOURCE_IMAGES=true`) |
